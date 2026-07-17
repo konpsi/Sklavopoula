@@ -15,6 +15,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from create_page import CREATE_PAGE
+from interview_feedback import InterviewFeedback, build_placeholder_feedback
 from voice_interview import InterviewError, VoiceInterviewService
 
 
@@ -523,6 +524,214 @@ MESSAGE_PAGE = """<!doctype html>
 """
 
 
+RESULTS_PAGE = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Interview Results</title>
+  <style>
+    :root {{
+      color-scheme: light;
+      --bg: #fbfdff;
+      --text: #172033;
+      --muted: #667085;
+      --line: #d8e2ee;
+      --red-bg: #fff1f1;
+      --red-line: #f4b8b8;
+      --red-text: #8a1f1f;
+      --green-bg: #eefaf4;
+      --green-line: #a9dfc2;
+      --green-text: #12613f;
+      --blue: #1759a8;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      font-family: Arial, Helvetica, sans-serif;
+      color: var(--text);
+      background: var(--bg);
+    }}
+    main {{
+      width: min(100%, 72rem);
+      margin: 0 auto;
+      padding: 2rem;
+    }}
+    h1 {{
+      margin: 0;
+      font-size: 2.4rem;
+      line-height: 1.1;
+      letter-spacing: 0;
+    }}
+    p {{
+      color: var(--muted);
+      line-height: 1.55;
+    }}
+    .summary {{
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      align-items: center;
+      margin-bottom: 1.5rem;
+    }}
+    .button {{
+      display: inline-flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 2.8rem;
+      padding: .7rem 1rem;
+      border: 1px solid #a9d2ff;
+      border-radius: .6rem;
+      background: #eff7ff;
+      color: var(--blue);
+      font-weight: 700;
+      text-decoration: none;
+      white-space: nowrap;
+    }}
+    .result-grid {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 1rem;
+      align-items: start;
+    }}
+    .box {{
+      border: 1px solid var(--line);
+      border-radius: .75rem;
+      padding: 1rem;
+    }}
+    .box.red {{
+      background: var(--red-bg);
+      border-color: var(--red-line);
+    }}
+    .box.green {{
+      background: var(--green-bg);
+      border-color: var(--green-line);
+    }}
+    .box h2 {{
+      margin: 0 0 .85rem;
+      font-size: 1.15rem;
+      line-height: 1.2;
+    }}
+    .box.red h2,
+    .box.red summary {{
+      color: var(--red-text);
+    }}
+    .box.green h2,
+    .box.green summary {{
+      color: var(--green-text);
+    }}
+    details {{
+      border-top: 1px solid rgba(23, 32, 51, .12);
+      padding: .75rem 0;
+    }}
+    details:first-of-type {{
+      border-top: 0;
+      padding-top: 0;
+    }}
+    summary {{
+      cursor: pointer;
+      font-weight: 700;
+    }}
+    .finding {{
+      margin-top: .65rem;
+      padding: .75rem;
+      border-radius: .55rem;
+      background: rgba(255, 255, 255, .65);
+    }}
+    .finding + .finding {{
+      margin-top: .6rem;
+    }}
+    .finding h3 {{
+      margin: 0;
+      font-size: .98rem;
+      line-height: 1.25;
+    }}
+    .finding p {{
+      margin: .45rem 0 0;
+      font-size: .95rem;
+    }}
+    .meta {{
+      display: inline-flex;
+      margin-top: .55rem;
+      padding: .2rem .5rem;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, .8);
+      color: var(--muted);
+      font-size: .78rem;
+      font-weight: 700;
+      text-transform: uppercase;
+    }}
+    .improvements {{
+      margin-top: 1rem;
+      border: 1px solid var(--line);
+      border-radius: .75rem;
+      background: #fff;
+      padding: 1rem;
+    }}
+    .improvements h2 {{
+      margin: 0 0 .8rem;
+      font-size: 1.15rem;
+    }}
+    .improvement {{
+      padding: .8rem 0;
+      border-top: 1px solid var(--line);
+    }}
+    .improvement:first-of-type {{
+      border-top: 0;
+      padding-top: 0;
+    }}
+    .improvement strong {{
+      display: block;
+      margin-bottom: .25rem;
+    }}
+    .empty {{
+      color: var(--muted);
+      margin: .5rem 0 0;
+    }}
+    @media (max-width: 48rem) {{
+      main {{
+        padding: 1.25rem;
+      }}
+      .summary,
+      .result-grid {{
+        grid-template-columns: 1fr;
+        display: grid;
+      }}
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <div class="summary">
+      <div>
+        <h1>Interview results</h1>
+        <p>{intro}</p>
+      </div>
+      <a class="button" href="/">Home</a>
+    </div>
+
+    <section class="result-grid" aria-label="Interview feedback">
+      <div class="box red">
+        <h2>Needs attention</h2>
+        {risk_sections}
+      </div>
+      <div class="box green">
+        <h2>Strengths / strong answers</h2>
+        {strength_sections}
+      </div>
+    </section>
+
+    <section class="improvements" aria-labelledby="improvements-title">
+      <h2 id="improvements-title">Suggested improvements</h2>
+      {improvement_sections}
+    </section>
+  </main>
+</body>
+</html>
+"""
+
+
 def get_current_cv():
     if not os.path.isdir(UPLOAD_DIR):
         return None
@@ -573,6 +782,87 @@ def render_home_page():
     return HOME_PAGE.replace("{cv_section}", cv_section).replace(
         "{interview_section}", interview_section
     )
+
+
+def render_findings(findings):
+    if not findings:
+        return '<p class="empty">No findings in this section yet.</p>'
+
+    rendered = []
+    for finding in findings:
+        fix = ""
+        if getattr(finding, "suggested_fix", None):
+            fix = f"<p><strong>Fix:</strong> {escape(finding.suggested_fix)}</p>"
+        rendered.append(
+            f"""
+            <article class="finding">
+              <h3>{escape(finding.title)}</h3>
+              <p>{escape(finding.summary)}</p>
+              <p><strong>Evidence:</strong> {escape(finding.evidence)}</p>
+              {fix}
+              <span class="meta">{escape(getattr(finding, "severity", "strength"))}</span>
+            </article>
+            """
+        )
+    return "\n".join(rendered)
+
+
+def render_risk_section(title, findings, open_by_default=False):
+    open_attr = " open" if open_by_default else ""
+    return f"""
+      <details{open_attr}>
+        <summary>{escape(title)} ({len(findings)})</summary>
+        {render_findings(findings)}
+      </details>
+    """
+
+
+def render_improvements(improvements):
+    if not improvements:
+        return '<p class="empty">No suggested improvements yet.</p>'
+
+    return "\n".join(
+        f"""
+        <article class="improvement">
+          <strong>{escape(item.title)}</strong>
+          <span class="meta">{escape(item.priority)}</span>
+          <p>{escape(item.action)}</p>
+        </article>
+        """
+        for item in improvements
+    )
+
+
+def render_results_page(feedback: InterviewFeedback, has_session: bool):
+    intro = (
+        "Here is the first pass of feedback from your latest interview."
+        if has_session
+        else "No completed interview was found yet, so this page is showing the feedback layout."
+    )
+    risk_sections = "\n".join(
+        (
+            render_risk_section("Red flags", feedback.red_flags, True),
+            render_risk_section("Contradictions", feedback.contradictions, True),
+            render_risk_section("Missed opportunities", feedback.missed_opportunities, True),
+        )
+    )
+    strength_sections = render_risk_section("Strengths / strong answers", feedback.strengths, True)
+    return RESULTS_PAGE.format(
+        intro=escape(intro),
+        risk_sections=risk_sections,
+        strength_sections=strength_sections,
+        improvement_sections=render_improvements(feedback.suggested_improvements),
+    )
+
+
+def load_session_data(session_id):
+    path = Path(INTERVIEW_DATA_DIR) / f"{session_id}.json"
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 class PageTextExtractor(HTMLParser):
@@ -650,6 +940,16 @@ class AppHandler(BaseHTTPRequestHandler):
         if path == "/create":
             session_id, cookie_header = self.session_id()
             self.respond(200, CREATE_PAGE, extra_headers={"Set-Cookie": cookie_header})
+            return
+        if path == "/results":
+            session_id, cookie_header = self.session_id()
+            session_data = load_session_data(session_id)
+            feedback = build_placeholder_feedback(session_data or {})
+            self.respond(
+                200,
+                render_results_page(feedback, bool(session_data)),
+                extra_headers={"Set-Cookie": cookie_header},
+            )
             return
         if path == "/interview":
             self.respond(

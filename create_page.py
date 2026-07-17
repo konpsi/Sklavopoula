@@ -129,6 +129,24 @@ CREATE_PAGE = r"""<!doctype html>
       color: var(--green);
       font-weight: 700;
     }
+    .result-link {
+      display: none;
+      justify-content: center;
+      align-items: center;
+      width: fit-content;
+      min-height: 2.8rem;
+      margin: 1rem auto 0;
+      padding: .7rem 1rem;
+      border: 1px solid #a9d2ff;
+      border-radius: .6rem;
+      background: #eff7ff;
+      color: #1759a8;
+      font-weight: 700;
+      text-decoration: none;
+    }
+    .result-link.visible {
+      display: inline-flex;
+    }
   </style>
 </head>
 <body>
@@ -149,6 +167,7 @@ CREATE_PAGE = r"""<!doctype html>
       <p id="question">Preparing your first question...</p>
       <button id="voice-button" type="button" disabled aria-describedby="status">Please wait</button>
       <p id="status" role="status" aria-live="polite"></p>
+      <a class="result-link" id="result-link" href="/results">View results</a>
     </section>
   </main>
 
@@ -159,6 +178,7 @@ CREATE_PAGE = r"""<!doctype html>
     const companyUrl = document.querySelector("#company-url");
     const setupStatus = document.querySelector("#setup-status");
     const button = document.querySelector("#voice-button");
+    const resultLink = document.querySelector("#result-link");
     const question = document.querySelector("#question");
     const status = document.querySelector("#status");
     let recorder;
@@ -295,7 +315,11 @@ CREATE_PAGE = r"""<!doctype html>
       if (turn.complete) {
         button.textContent = "Complete";
         button.disabled = true;
-        status.textContent = "Your structured answers were saved locally.";
+        status.textContent = "Your structured answers were saved locally. Opening results...";
+        resultLink.classList.add("visible");
+        window.setTimeout(() => {
+          window.location.href = "/results";
+        }, 900);
       } else {
         button.textContent = "Tap to speak";
         button.disabled = false;
