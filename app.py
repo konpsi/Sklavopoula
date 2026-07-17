@@ -25,6 +25,23 @@ ALLOWED_CV_EXTENSIONS = {".pdf", ".doc", ".docx", ".txt"}
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024
 MAX_AUDIO_SIZE = 15 * 1024 * 1024
 INTERVIEW_DATA_DIR = os.path.join(os.path.dirname(__file__), "interview_data")
+
+
+def load_local_env():
+    env_path = os.path.join(os.path.dirname(__file__), ".env")
+    if not os.path.isfile(env_path):
+        return
+
+    with open(env_path, encoding="utf-8") as env_file:
+        for line in env_file:
+            clean_line = line.strip()
+            if not clean_line or clean_line.startswith("#") or "=" not in clean_line:
+                continue
+            name, value = clean_line.split("=", 1)
+            os.environ.setdefault(name.strip(), value.strip().strip('"').strip("'"))
+
+
+load_local_env()
 INTERVIEW_SERVICE = VoiceInterviewService(INTERVIEW_DATA_DIR)
 MAX_COMPANY_CONTEXT_CHARS = 12000
 
