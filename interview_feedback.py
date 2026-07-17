@@ -1,4 +1,4 @@
-"""Feedback data structures and placeholder analysis for interview results."""
+"""Feedback data structures and validation for interview results."""
 
 from __future__ import annotations
 
@@ -57,102 +57,83 @@ class InterviewFeedback:
         return asdict(self)
 
 
-def build_placeholder_feedback(session_data: dict[str, Any]) -> InterviewFeedback:
-    """Create deterministic placeholder feedback until the real analyzer is plugged in."""
+def feedback_from_llm(payload: dict[str, Any]) -> InterviewFeedback:
+    """Convert a structured LLM response into the UI's typed feedback model."""
 
-    profile = session_data.get("profile") or {}
-    turns = session_data.get("turns") or []
-    captured = [
-        item
-        for item in profile.values()
-        if item.get("status") == "captured" and item.get("value")
-    ]
-    skipped = [item for item in profile.values() if item.get("status") == "skipped"]
-    clarifications = [turn for turn in turns if turn.get("outcome") == "clarify"]
+    def clean(value: Any, fallback: str = "") -> str:
+        return " ".join(str(value or fallback).split())[:1200]
 
-    feedback = InterviewFeedback()
+    def severity(value: Any) -> Literal["low", "medium", "high"]:
+        return value if value in {"low", "medium", "high"} else "medium"
 
-    if skipped:
-        item = skipped[0]
-        feedback.missed_opportunities.append(
-            RiskFinding(
-                id="missed-skipped-detail",
-                category="missed_opportunity",
-                title="Some CV sections were skipped",
-                summary="Skipped answers can leave the generated CV thinner than it needs to be.",
-                evidence=f"{item.get('attribute', 'A section')} was skipped.",
-                severity="medium",
-                related_question_id=item.get("question_id"),
-                suggested_fix="Revisit skipped sections and add one concrete example where possible.",
+    def risks(key: str, category: RiskCategory) -> list[RiskFinding]:
+        findings = []
+        raw_items = payload.get(key) if isinstance(payload.get(key), list) else []
+        for index, item in enumerate(raw_items, start=1):
+            if not isinstance(item, dict):
+                continue
+            title = clean(item.get("title"))
+            summary = clean(item.get("summary"))
+            evidence = clean(item.get("evidence"))
+            if not title or not summary or not evidence:
+                continue
+            suggested_fix = clean(item.get("suggested_fix")) or None
+            findings.append(
+                RiskFinding(
+                    id=f"{category}-{index}",
+                    category=category,
+                    title=title,
+                    summary=summary,
+                    evidence=evidence,
+                    severity=severity(item.get("severity")),
+                    suggested_fix=suggested_fix,
+                )
             )
-        )
+        return findings
 
-    if clarifications:
-        turn = clarifications[0]
-        feedback.red_flags.append(
-            RiskFinding(
-                id="red-clarity",
-                category="red_flag",
-                title="Some answers needed clarification",
-                summary="A hiring interviewer may need clearer, more direct answers.",
-                evidence=turn.get("raw_transcript") or "A clarification turn was recorded.",
-                severity="low",
-                related_question_id=turn.get("question_id"),
-                suggested_fix="Practice answering with a short situation, action, and result.",
+    strengths = []
+    raw_strengths = payload.get("strengths") if isinstance(payload.get("strengths"), list) else []
+    for index, item in enumerate(raw_strengths, start=1):
+        if not isinstance(item, dict):
+            continue
+        title = clean(item.get("title"))
+        summary = clean(item.get("summary"))
+        evidence = clean(item.get("evidence"))
+        if title and summary and evidence:
+            strengths.append(
+                StrengthFinding(
+                    id=f"strength-{index}",
+                    title=title,
+                    summary=summary,
+                    evidence=evidence,
+                )
             )
-        )
 
-    if not captured:
-        feedback.red_flags.append(
-            RiskFinding(
-                id="red-no-captured-answers",
-                category="red_flag",
-                title="No strong answer data captured yet",
-                summary="The app does not yet have enough interview material to evaluate the CV.",
-                evidence="No captured profile answers were found for this session.",
-                severity="high",
-                suggested_fix="Complete the voice questions with specific examples and outcomes.",
-            )
-        )
-    else:
-        strongest = captured[0]
-        feedback.strengths.append(
-            StrengthFinding(
-                id="strength-specific-answer",
-                title=f"{strongest.get('attribute', 'One answer')} is usable",
-                summary="This answer gives the CV generator concrete material to work with.",
-                evidence=str(strongest.get("value", ""))[:240],
-                related_question_id=strongest.get("question_id"),
-            )
-        )
-
-    feedback.contradictions.append(
-        RiskFinding(
-            id="contradictions-pending-analyzer",
-            category="contradiction",
-            title="Contradiction checks pending",
-            summary="No contradiction analyzer has been plugged in yet.",
-            evidence="Future analysis will compare the CV, profile answers, and interview transcript.",
-            severity="low",
-            suggested_fix="Connect the analyzer to populate this section with real findings.",
-        )
+    improvements = []
+    raw_improvements = (
+        payload.get("suggested_improvements")
+        if isinstance(payload.get("suggested_improvements"), list)
+        else []
     )
+    for index, item in enumerate(raw_improvements, start=1):
+        if not isinstance(item, dict):
+            continue
+        title = clean(item.get("title"))
+        action = clean(item.get("action"))
+        if title and action:
+            improvements.append(
+                SuggestedImprovement(
+                    id=f"improvement-{index}",
+                    title=title,
+                    action=action,
+                    priority=severity(item.get("priority")),
+                )
+            )
 
-    feedback.suggested_improvements.append(
-        SuggestedImprovement(
-            id="improve-add-metrics",
-            title="Add measurable outcomes",
-            action="Where possible, include numbers, scope, tools, time saved, revenue, users, or quality improvements.",
-            priority="high",
-        )
+    return InterviewFeedback(
+        red_flags=risks("red_flags", "red_flag"),
+        contradictions=risks("contradictions", "contradiction"),
+        missed_opportunities=risks("missed_opportunities", "missed_opportunity"),
+        strengths=strengths,
+        suggested_improvements=improvements,
     )
-    feedback.suggested_improvements.append(
-        SuggestedImprovement(
-            id="improve-company-fit",
-            title="Tie answers to the target company",
-            action="When a company website is provided, connect your experience to its products, values, or role needs.",
-            priority="medium",
-        )
-    )
-
-    return feedback

@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 from xml.etree import ElementTree
 
 from create_page import CREATE_PAGE
-from interview_feedback import InterviewFeedback, build_placeholder_feedback
+from interview_feedback import InterviewFeedback
 from interview_page import INTERVIEW_PAGE
 from mock_interview import MockInterviewService
 from voice_interview import InterviewError, VoiceInterviewService
@@ -586,6 +586,21 @@ RESULTS_PAGE = """<!doctype html>
       align-items: center;
       margin-bottom: 1.5rem;
     }}
+    .eyebrow {{
+      display: inline-block;
+      margin-bottom: .55rem;
+      color: var(--blue);
+      font-size: .82rem;
+      font-weight: 800;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }}
+    .summary-actions {{
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: .55rem;
+    }}
     .button {{
       display: inline-flex;
       justify-content: center;
@@ -599,6 +614,11 @@ RESULTS_PAGE = """<!doctype html>
       font-weight: 700;
       text-decoration: none;
       white-space: nowrap;
+    }}
+    .button.primary {{
+      border-color: #86cfac;
+      background: #eefaf4;
+      color: var(--green-text);
     }}
     .result-grid {{
       display: grid;
@@ -709,6 +729,9 @@ RESULTS_PAGE = """<!doctype html>
         grid-template-columns: 1fr;
         display: grid;
       }}
+      .summary-actions {{
+        justify-content: flex-start;
+      }}
     }}
   </style>
 </head>
@@ -716,10 +739,15 @@ RESULTS_PAGE = """<!doctype html>
   <main>
     <div class="summary">
       <div>
+        <span class="eyebrow">{context_line}</span>
         <h1>Interview results</h1>
         <p>{intro}</p>
       </div>
-      <a class="button" href="/">Home</a>
+      <div class="summary-actions">
+        <a class="button" href="/interview-transcript" target="_blank">Transcript</a>
+        <a class="button primary" href="/interview">Practice again</a>
+        <a class="button" href="/">Home</a>
+      </div>
     </div>
 
     <section class="result-grid" aria-label="Interview feedback">
@@ -870,11 +898,17 @@ def render_home_page(session_id=None):
         Path(MOCK_INTERVIEW_TRANSCRIPT_DIR) / f"{session_id}.txt" if session_id else None
     )
     if transcript_path and transcript_path.is_file():
-        interview_section = """
+        results_link = (
+            '<a class="button green" href="/results">View interview feedback</a>'
+            if session_id and MOCK_INTERVIEW_SERVICE.has_completed_interview(session_id)
+            else ""
+        )
+        interview_section = f"""
           <a class="cv-link" href="/interview-transcript" target="_blank" rel="noreferrer">
             <span>Latest interview transcript</span>
             <span class="cv-type">TXT</span>
           </a>
+          {results_link}
           <a class="button green" href="/interview">Start another interview</a>
         """
     else:
@@ -892,7 +926,7 @@ def render_home_page(session_id=None):
 
 def render_findings(findings):
     if not findings:
-        return '<p class="empty">No findings in this section yet.</p>'
+        return '<p class="empty">No evidence-based issues found in this section.</p>'
 
     rendered = []
     for finding in findings:
@@ -939,11 +973,22 @@ def render_improvements(improvements):
     )
 
 
-def render_results_page(feedback: InterviewFeedback, has_session: bool):
+def render_results_page(feedback: InterviewFeedback, context):
+    attention_count = (
+        len(feedback.red_flags)
+        + len(feedback.contradictions)
+        + len(feedback.missed_opportunities)
+    )
     intro = (
-        "Here is the first pass of feedback from your latest interview."
-        if has_session
-        else "No completed interview was found yet, so this page is showing the feedback layout."
+        f"The review found {attention_count} item{'s' if attention_count != 1 else ''} to review, "
+        f"{len(feedback.strengths)} strength{'s' if len(feedback.strengths) != 1 else ''}, "
+        f"and {len(feedback.suggested_improvements)} practical next step"
+        f"{'s' if len(feedback.suggested_improvements) != 1 else ''}."
+    )
+    company_host = urlparse(context.get("company_url", "")).netloc or "target company"
+    context_line = (
+        f"{context.get('job_title', 'Mock interview')} · {company_host} · "
+        f"{context.get('answered', 0)} answers reviewed"
     )
     risk_sections = "\n".join(
         (
@@ -955,6 +1000,7 @@ def render_results_page(feedback: InterviewFeedback, has_session: bool):
     strength_sections = render_risk_section("Strengths / strong answers", feedback.strengths, True)
     return RESULTS_PAGE.format(
         intro=escape(intro),
+        context_line=escape(context_line),
         risk_sections=risk_sections,
         strength_sections=strength_sections,
         improvement_sections=render_improvements(feedback.suggested_improvements),
@@ -1054,13 +1100,28 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         if path == "/results":
             session_id, cookie_header = self.session_id()
-            session_data = load_session_data(session_id)
-            feedback = build_placeholder_feedback(session_data or {})
-            self.respond(
-                200,
-                render_results_page(feedback, bool(session_data)),
-                extra_headers={"Set-Cookie": cookie_header},
-            )
+            try:
+                feedback = MOCK_INTERVIEW_SERVICE.get_feedback(session_id)
+                context = MOCK_INTERVIEW_SERVICE.results_context(session_id)
+                self.respond(
+                    200,
+                    render_results_page(feedback, context),
+                    extra_headers={"Set-Cookie": cookie_header},
+                )
+            except InterviewError as exc:
+                print(f"[OpenRouter interview feedback] {exc}", flush=True)
+                self.respond(
+                    503,
+                    MESSAGE_PAGE.format(
+                        title="Interview feedback",
+                        heading="Feedback is not ready",
+                        message=(
+                            f"{escape(str(exc))} Refresh this page to try the analysis again, "
+                            "or return home and review the transcript."
+                        ),
+                    ),
+                    extra_headers={"Set-Cookie": cookie_header},
+                )
             return
         if path == "/interview":
             session_id, cookie_header = self.session_id()
@@ -1105,7 +1166,22 @@ class AppHandler(BaseHTTPRequestHandler):
                 job_title = str(payload.get("job_title", "")).strip()
                 if not company_url:
                     raise InterviewError("Please enter the company website URL.")
-                company_context = fetch_company_context(company_url)
+                parsed_company_url = urlparse(company_url)
+                if (
+                    parsed_company_url.scheme not in {"http", "https"}
+                    or not parsed_company_url.netloc
+                ):
+                    raise InterviewError(
+                        "Please enter a full company website URL starting with http:// or https://."
+                    )
+                try:
+                    company_context = fetch_company_context(company_url)
+                except InterviewError as exc:
+                    print(f"[Company context] {exc}", flush=True)
+                    company_context = {
+                        "url": company_url,
+                        "content": "The company page was unavailable; use general role context.",
+                    }
                 cv_context = load_cv_context(session_id)
                 result = MOCK_INTERVIEW_SERVICE.start(
                     session_id,

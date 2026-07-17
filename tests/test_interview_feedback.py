@@ -1,21 +1,25 @@
 import unittest
 
-from interview_feedback import RiskFinding, build_placeholder_feedback
+from interview_feedback import RiskFinding, feedback_from_llm
 
 
 class InterviewFeedbackTests(unittest.TestCase):
     def test_feedback_shape_has_explicit_risk_categories(self):
-        feedback = build_placeholder_feedback(
+        feedback = feedback_from_llm(
             {
-                "profile": {
-                    "skills": {
-                        "question_id": "skills",
-                        "attribute": "Skills",
-                        "status": "captured",
-                        "value": "Python, customer support, and reporting.",
+                "red_flags": [],
+                "contradictions": [
+                    {
+                        "title": "Dates do not align",
+                        "summary": "The spoken dates conflict with the CV.",
+                        "evidence": "The CV says one year; the candidate said four months.",
+                        "severity": "high",
+                        "suggested_fix": "Confirm the correct dates before the next interview.",
                     }
-                },
-                "turns": [],
+                ],
+                "missed_opportunities": [],
+                "strengths": [],
+                "suggested_improvements": [],
             }
         )
         data = feedback.to_dict()
@@ -28,23 +32,27 @@ class InterviewFeedbackTests(unittest.TestCase):
         self.assertIsInstance(feedback.contradictions[0], RiskFinding)
         self.assertEqual(feedback.contradictions[0].category, "contradiction")
 
-    def test_skipped_answer_becomes_missed_opportunity(self):
-        feedback = build_placeholder_feedback(
+    def test_llm_missed_opportunity_is_converted(self):
+        feedback = feedback_from_llm(
             {
-                "profile": {
-                    "projects": {
-                        "question_id": "projects",
-                        "attribute": "Projects",
-                        "status": "skipped",
-                        "value": None,
+                "red_flags": [],
+                "contradictions": [],
+                "missed_opportunities": [
+                    {
+                        "title": "Project example was not used",
+                        "summary": "A relevant CV project was not connected to the role.",
+                        "evidence": "The CV lists a reporting project, but the answer stayed general.",
+                        "severity": "medium",
+                        "suggested_fix": "Use the project as a concise situation-action-result example.",
                     }
-                },
-                "turns": [],
+                ],
+                "strengths": [],
+                "suggested_improvements": [],
             }
         )
 
         self.assertEqual(feedback.missed_opportunities[0].category, "missed_opportunity")
-        self.assertIn("skipped", feedback.missed_opportunities[0].summary.lower())
+        self.assertIn("project", feedback.missed_opportunities[0].summary.lower())
 
 
 if __name__ == "__main__":

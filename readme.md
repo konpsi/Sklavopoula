@@ -49,12 +49,19 @@ company website and target job title. The app extracts the current CV locally, r
 company-page reader, and asks the configured Gemini model to create a flexible interview
 outline. A second model call welcomes the candidate and asks the opening question.
 
-Each later turn sends the model the CV text, company-page context, job title, outline, and
-the full interview conversation so it can ask a natural follow-up or move to another
-outline topic. Microphone audio is transcribed locally and responses are spoken with the
-local operating-system voice. The only mock-interview file saved is a plain-text speaker
+Gemini generates six distinct questions once at the start. The app then asks them in order,
+exactly once each, so the demo does not depend on another model call between answers.
+Microphone audio is transcribed locally and responses are spoken with the local
+operating-system voice. The only mock-interview file saved is a plain-text speaker
 transcript at `mock_interview_transcripts/<session-id>.txt`, using `Interviewer:` and
 `Candidate:` labels. The outline and source context remain in memory and are not logged.
+
+When the interview ends, the app automatically opens the results screen. Gemini compares
+the CV and interview transcript, then produces evidence-based red flags, contradictions,
+missed opportunities, strengths, and prioritized improvements. Feedback stays in memory
+for the current app session and is not written to JSON or any other file. Refreshing the
+results page reuses the completed analysis; the home page links back to both the feedback
+and the plain-text transcript.
 
 Text-based PDF, DOCX, TXT, and legacy DOC uploads can be used as interview context. Scanned
 image-only PDFs need OCR before the app can read them.

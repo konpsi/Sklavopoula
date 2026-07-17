@@ -270,9 +270,10 @@ INTERVIEW_PAGE = r"""<!doctype html>
       status.textContent = turn.warning || "The interviewer is speaking";
       await speak(turn.response);
       if (turn.complete) {
-        button.textContent = "Complete";
+        button.textContent = "Analyzing...";
         button.disabled = true;
-        status.innerHTML = "Your interview transcript was saved locally. <a href=\"/interview-transcript\" target=\"_blank\">View transcript</a>.";
+        status.textContent = "Reviewing your answers and preparing feedback";
+        window.location.assign(turn.results_url || "/results");
       } else {
         button.textContent = "Tap to speak";
         button.disabled = false;
