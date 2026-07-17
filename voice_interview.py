@@ -26,15 +26,18 @@ class InterviewError(RuntimeError):
 @dataclass
 class InterviewSession:
     session_id: str
-    current_question_id: str = QUESTIONNAIRE[0]["id"]
-    answers: list[dict[str, Any]] = field(default_factory=list)
+    current_question_id: str | None = None
+    current_question_text: str | None = None
+    profile: dict[str, dict[str, Any]] = field(default_factory=dict)
+    turns: list[dict[str, Any]] = field(default_factory=list)
+    clarification_attempts: dict[str, int] = field(default_factory=dict)
 
     @property
-    def answered_ids(self) -> set[str]:
-        return {answer["question_id"] for answer in self.answers}
+    def resolved_ids(self) -> set[str]:
+        return set(self.profile)
 
-    def pending_items(self) -> list[dict[str, str]]:
-        return [item for item in QUESTIONNAIRE if item["id"] not in self.answered_ids]
+    def pending_items(self) -> list[dict[str, Any]]:
+        return [item for item in QUESTIONNAIRE if item["id"] not in self.resolved_ids]
 
 
 class OpenRouterClient:
@@ -46,59 +49,33 @@ class OpenRouterClient:
     def configured(self) -> bool:
         return bool(self.api_key)
 
-    def initial_question(self, first_item: dict[str, str]) -> str:
-        content = self._completion(
-            [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a warm, concise CV interviewer. Start the interview by asking "
-                        "exactly one brief question that covers the supplied questionnaire item. "
-                        "Return only a JSON object with a question field."
-                    ),
-                },
-                {"role": "user", "content": json.dumps(first_item, ensure_ascii=False)},
-            ],
-            max_tokens=100,
-        )
-        try:
-            result = self._parse_json_object(content)
-        except json.JSONDecodeError as exc:
-            raise InterviewError("OpenRouter returned an unexpected response.") from exc
-        question = str(result.get("question") or "").strip()
-        if not question:
-            raise InterviewError("OpenRouter did not return the first interview question.")
-        return question
-
-    def next_question(
+    def evaluate_answer(
         self,
-        current_item: dict[str, str],
+        current_item: dict[str, Any],
+        asked_question: str,
         transcript: str,
-        answers: list[dict[str, Any]],
-        pending_items: list[dict[str, str]],
+        clarification_attempts: int,
     ) -> dict[str, Any]:
-        if not self.configured:
-            raise InterviewError("OPENROUTER_API_KEY is not configured on the server.")
-
-        allowed = [
-            {"id": item["id"], "title": item["title"], "outline_question": item["question"]}
-            for item in pending_items
-        ]
         system_prompt = (
-            "You are a warm, concise CV interviewer. The application, not you, stores the user's "
-            "answer under the current questionnaire attribute. Acknowledge the answer in one short "
-            "sentence, then choose the most useful next item only from the supplied pending items. "
-            "Ask one natural question that covers that item's outline. Do not ask for information "
-            "outside the questionnaire. Never claim that you changed or inferred a stored answer. "
-            "Return only a JSON object with acknowledgement, next_question_id, and question. "
-            "If pending_items is empty, next_question_id and question must be null and the "
-            "acknowledgement should briefly say the questionnaire is complete."
+            "You evaluate one spoken reply in a voice-guided CV interview. Decide whether the "
+            "reply supplies usable information for the current questionnaire item. Return captured "
+            "when it answers the item, clarify when it asks for an explanation, is ambiguous, or "
+            "does not yet contain usable information, and skipped when the user clearly says they "
+            "have nothing to add or prefer not to answer. A phrase such as 'explain that', 'what do "
+            "you mean', or 'repeat the question' is always clarify, never captured. 'I don't have "
+            "any' or 'I prefer not to say' is skipped; 'I don't know what you mean' is clarify. "
+            "For captured, normalized_value must faithfully clean up only facts present in the "
+            "transcript, without guessing, and assistant_reply must be null. For clarify, "
+            "normalized_value must be null and assistant_reply must directly answer the user's "
+            "need, then ask for the same information in a simpler way. For skipped, both fields "
+            "must be null. Keep spoken replies brief."
         )
         user_payload = {
-            "current_item": current_item,
-            "user_answer": transcript,
-            "saved_answers": answers,
-            "pending_items": allowed,
+            "questionnaire_item": current_item,
+            "question_the_user_heard": asked_question,
+            "raw_transcript": transcript,
+            "previous_clarification_attempts": clarification_attempts,
+            "clarification_guidance": current_item.get("clarification"),
         }
         content = self._completion(
             [
@@ -106,13 +83,123 @@ class OpenRouterClient:
                 {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
             ],
             max_tokens=220,
+            schema_name="cv_answer_evaluation",
+            schema={
+                "type": "object",
+                "properties": {
+                    "outcome": {"enum": ["captured", "clarify", "skipped"]},
+                    "normalized_value": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Grounded CV-ready value for captured, otherwise null.",
+                    },
+                    "assistant_reply": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "A clarification reply only when outcome is clarify.",
+                    },
+                },
+                "required": ["outcome", "normalized_value", "assistant_reply"],
+                "additionalProperties": False,
+            },
+        )
+        try:
+            result = self._parse_json_object(content)
+        except json.JSONDecodeError as exc:
+            raise InterviewError("OpenRouter returned an unexpected response.") from exc
+        return self._validate_evaluation(result)
+
+    def select_next_question(
+        self,
+        profile: dict[str, dict[str, Any]],
+        pending_items: list[dict[str, Any]],
+        last_resolution: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        if not self.configured:
+            raise InterviewError("OPENROUTER_API_KEY is not configured on the server.")
+
+        allowed = [
+            {
+                "id": item["id"],
+                "title": item["title"],
+                "goal": item["goal"],
+                "outline_question": item["question"],
+                "complete_when": item["complete_when"],
+            }
+            for item in pending_items
+        ]
+        system_prompt = (
+            "You are a warm, concise CV interviewer. Choose exactly one item from pending_items "
+            "that is most natural to ask next. Briefly transition from the last resolved answer, "
+            "then conversationally ask one question that covers the chosen item's goal. Never ask "
+            "for an item outside pending_items and never invent profile facts. If this is the first "
+            "question, transition must be a short welcome. If pending_items is empty, return a brief "
+            "completion transition and null for next_question_id and question."
+        )
+        user_payload = {
+            "saved_profile": profile,
+            "last_resolution": last_resolution,
+            "pending_items": allowed,
+        }
+        pending_ids = [item["id"] for item in pending_items]
+        content = self._completion(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+            ],
+            max_tokens=220,
+            schema_name="cv_interview_turn",
+            schema={
+                "type": "object",
+                "properties": {
+                    "transition": {
+                        "type": "string",
+                        "description": "A brief welcome, acknowledgement, or completion sentence.",
+                    },
+                    "next_question_id": {
+                        "enum": pending_ids + [None],
+                        "description": "An ID from pending_items, or null when none remain.",
+                    },
+                    "question": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "One brief next question, or null when complete.",
+                    },
+                },
+                "required": ["transition", "next_question_id", "question"],
+                "additionalProperties": False,
+            },
         )
         try:
             return self._parse_json_object(content)
         except json.JSONDecodeError as exc:
             raise InterviewError("OpenRouter returned an unexpected response.") from exc
 
-    def _completion(self, messages: list[dict[str, str]], max_tokens: int) -> str:
+    @staticmethod
+    def _validate_evaluation(result: dict[str, Any]) -> dict[str, Any]:
+        outcome = result.get("outcome")
+        value = result.get("normalized_value")
+        reply = result.get("assistant_reply")
+        if outcome not in {"captured", "clarify", "skipped"}:
+            raise InterviewError("OpenRouter returned an invalid answer outcome.")
+        if outcome == "captured":
+            value = str(value or "").strip()
+            if not value or reply is not None:
+                raise InterviewError("OpenRouter returned an invalid captured answer.")
+            return {"outcome": outcome, "normalized_value": value, "assistant_reply": None}
+        if outcome == "clarify":
+            reply = str(reply or "").strip()
+            if not reply or value is not None:
+                raise InterviewError("OpenRouter returned an invalid clarification.")
+            return {"outcome": outcome, "normalized_value": None, "assistant_reply": reply}
+        if value is not None or reply is not None:
+            raise InterviewError("OpenRouter returned an invalid skipped answer.")
+        return {"outcome": outcome, "normalized_value": None, "assistant_reply": None}
+
+    def _completion(
+        self,
+        messages: list[dict[str, str]],
+        max_tokens: int,
+        schema_name: str,
+        schema: dict[str, Any],
+    ) -> str:
         if not self.configured:
             raise InterviewError("OPENROUTER_API_KEY is not configured on the server.")
         payload = {
@@ -120,6 +207,16 @@ class OpenRouterClient:
             "temperature": 0.2,
             "max_tokens": max_tokens,
             "messages": messages,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": schema_name,
+                    "strict": True,
+                    "schema": schema,
+                },
+            },
+            "provider": {"require_parameters": True},
+            "plugins": [{"id": "response-healing"}],
         }
         request = urllib.request.Request(
             OPENROUTER_URL,
@@ -137,10 +234,13 @@ class OpenRouterClient:
             with urllib.request.urlopen(request, timeout=45) as response:
                 result = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")[:300]
-            raise InterviewError(f"OpenRouter returned HTTP {exc.code}: {detail}") from exc
+            detail = self._http_error_detail(exc)
+            raise InterviewError(f"OpenRouter HTTP {exc.code}: {detail}") from exc
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             raise InterviewError(f"OpenRouter could not be reached: {exc}") from exc
+
+        if isinstance(result, dict) and result.get("error"):
+            raise InterviewError(f"OpenRouter error: {self._format_api_error(result['error'])}")
 
         try:
             content = result["choices"][0]["message"]["content"]
@@ -149,6 +249,34 @@ class OpenRouterClient:
             return str(content)
         except (KeyError, IndexError, TypeError) as exc:
             raise InterviewError("OpenRouter returned an unexpected response.") from exc
+
+    @classmethod
+    def _http_error_detail(cls, exc: urllib.error.HTTPError) -> str:
+        raw = exc.read().decode("utf-8", errors="replace")
+        try:
+            payload = json.loads(raw)
+            if isinstance(payload, dict) and "error" in payload:
+                return cls._format_api_error(payload["error"])
+        except json.JSONDecodeError:
+            pass
+        return cls._safe_detail(raw or exc.reason)
+
+    @classmethod
+    def _format_api_error(cls, error: Any) -> str:
+        if not isinstance(error, dict):
+            return cls._safe_detail(error)
+        code = error.get("code")
+        message = cls._safe_detail(error.get("message") or "Unknown API error")
+        metadata = error.get("metadata") if isinstance(error.get("metadata"), dict) else {}
+        error_type = metadata.get("error_type")
+        provider = metadata.get("provider_name")
+        labels = [str(value) for value in (code, error_type, provider) if value not in (None, "")]
+        return f"{' / '.join(labels)}: {message}" if labels else message
+
+    @staticmethod
+    def _safe_detail(value: Any) -> str:
+        detail = " ".join(str(value).split())
+        return detail[:240] or "No error details were returned."
 
     @staticmethod
     def _parse_json_object(content: str) -> dict[str, Any]:
@@ -256,19 +384,24 @@ class VoiceInterviewService:
         session = InterviewSession(session_id=session_id)
         with self._sessions_lock:
             self.sessions[session_id] = session
-        self._save(session)
-        first = QUESTION_BY_ID[session.current_question_id]
         warning = None
         try:
-            question = self.llm.initial_question(first)
-        except InterviewError:
-            question = first["question"]
-            warning = "The AI service was unavailable, so the first outline question was used."
+            selected = self.llm.select_next_question(
+                session.profile, session.pending_items(), last_resolution=None
+            )
+        except InterviewError as exc:
+            print(f"[OpenRouter] {exc}", flush=True)
+            selected = self._fallback_selection(session.pending_items(), last_resolution=None)
+            warning = f"{exc} The first outline question was used instead."
+        question, spoken_response, complete = self._apply_selection(session, selected)
+        current = QUESTION_BY_ID[session.current_question_id] if session.current_question_id else None
+        self._save(session)
         result = {
-            "question_number": 1,
-            "attribute": first["title"],
+            "question_number": self._question_number(current["id"]) if current else None,
+            "attribute": current["title"] if current else None,
             "question": question,
-            "complete": False,
+            "response": spoken_response,
+            "complete": complete,
         }
         if warning:
             result["warning"] = warning
@@ -276,51 +409,131 @@ class VoiceInterviewService:
 
     def answer(self, session_id: str, audio_path: str) -> dict[str, Any]:
         session = self._session(session_id)
+        if session.current_question_id is None:
+            raise InterviewError("This questionnaire is already complete.")
         transcript = self.transcriber.transcribe(audio_path)
         current = QUESTION_BY_ID[session.current_question_id]
-        answer_record = {
-            "question_number": next(
-                index for index, item in enumerate(QUESTIONNAIRE, start=1) if item["id"] == current["id"]
-            ),
+        asked_question = session.current_question_text or current["question"]
+        attempts = session.clarification_attempts.get(current["id"], 0)
+        try:
+            evaluation = self.llm.evaluate_answer(current, asked_question, transcript, attempts)
+        except InterviewError as exc:
+            print(f"[OpenRouter] {exc}", flush=True)
+            reply = "I couldn't reliably process that response. Please say it again."
+            session.current_question_text = reply
+            session.turns.append(
+                self._turn_record(
+                    session,
+                    current,
+                    asked_question,
+                    transcript,
+                    "processing_error",
+                    None,
+                    reply,
+                    error=str(exc),
+                )
+            )
+            self._save(session)
+            return {
+                "transcript": transcript,
+                "saved_answer": None,
+                "outcome": "processing_error",
+                "response": reply,
+                "question": reply,
+                "complete": False,
+                "answered": len(session.profile),
+                "total": len(QUESTIONNAIRE),
+                "warning": str(exc),
+            }
+
+        if evaluation["outcome"] == "clarify":
+            reply = evaluation["assistant_reply"]
+            attempts += 1
+            session.clarification_attempts[current["id"]] = attempts
+            if attempts >= 2 and "skip" not in reply.lower():
+                reply = f"{reply} You can also say skip if you would rather move on."
+            session.current_question_text = reply
+            session.turns.append(
+                self._turn_record(
+                    session,
+                    current,
+                    asked_question,
+                    transcript,
+                    "clarify",
+                    None,
+                    reply,
+                )
+            )
+            self._save(session)
+            return {
+                "transcript": transcript,
+                "saved_answer": None,
+                "outcome": "clarify",
+                "response": reply,
+                "question": reply,
+                "complete": False,
+                "answered": len(session.profile),
+                "total": len(QUESTIONNAIRE),
+            }
+
+        outcome = evaluation["outcome"]
+        profile_record = {
+            "question_number": self._question_number(current["id"]),
             "question_id": current["id"],
             "attribute": current["title"],
-            "value": transcript,
+            "status": outcome,
+            "value": evaluation["normalized_value"],
+            "raw_transcript": transcript,
         }
-        session.answers.append(answer_record)
-        pending = session.pending_items()
-
-        warning = None
+        turn_record = self._turn_record(
+            session,
+            current,
+            asked_question,
+            transcript,
+            outcome,
+            evaluation["normalized_value"],
+            None,
+        )
+        session.profile[current["id"]] = profile_record
+        session.turns.append(turn_record)
         try:
-            llm_turn = self.llm.next_question(current, transcript, session.answers, pending)
+            self._save(session)
+        except InterviewError:
+            session.profile.pop(current["id"], None)
+            session.turns.pop()
+            raise
+
+        session.clarification_attempts.pop(current["id"], None)
+        last_resolution = {
+            "question_id": current["id"],
+            "attribute": current["title"],
+            "status": outcome,
+            "value": evaluation["normalized_value"],
+        }
+        warning = None
+        pending = session.pending_items()
+        try:
+            selected = self.llm.select_next_question(session.profile, pending, last_resolution)
         except InterviewError as exc:
-            warning = str(exc)
-            llm_turn = self._fallback_turn(pending)
+            print(f"[OpenRouter] {exc}", flush=True)
+            selected = self._fallback_selection(pending, last_resolution)
+            warning = f"{exc} The questionnaire continued in order."
 
-        next_item = self._validated_next_item(llm_turn.get("next_question_id"), pending)
-        acknowledgement = str(llm_turn.get("acknowledgement") or "Thanks, I've noted that.").strip()
-        if next_item is None:
-            question = None
-            spoken_response = acknowledgement
-            complete = True
-        else:
-            session.current_question_id = next_item["id"]
-            proposed_question = str(llm_turn.get("question") or "").strip()
-            question = proposed_question or next_item["question"]
-            spoken_response = f"{acknowledgement} {question}".strip()
-            complete = False
-
+        question, spoken_response, complete = self._apply_selection(session, selected)
+        turn_record["assistant_response"] = spoken_response
         self._save(session)
         result = {
             "transcript": transcript,
-            "saved_answer": answer_record,
+            "saved_answer": profile_record,
+            "outcome": outcome,
             "response": spoken_response,
             "question": question,
             "complete": complete,
-            "answered": len(session.answers),
+            "answered": len(session.profile),
             "total": len(QUESTIONNAIRE),
         }
         if warning:
-            result["warning"] = "The AI service was unavailable, so the questionnaire continued in order."
+            result["warning"] = warning
         return result
 
     def synthesize(self, text: str) -> bytes:
@@ -338,36 +551,101 @@ class VoiceInterviewService:
 
     @staticmethod
     def _validated_next_item(
-        proposed_id: Any, pending: list[dict[str, str]]
-    ) -> dict[str, str] | None:
+        proposed_id: Any, pending: list[dict[str, Any]]
+    ) -> dict[str, Any] | None:
         if not pending:
             return None
         allowed = {item["id"]: item for item in pending}
         return allowed.get(str(proposed_id), pending[0])
 
     @staticmethod
-    def _fallback_turn(pending: list[dict[str, str]]) -> dict[str, Any]:
+    def _fallback_selection(
+        pending: list[dict[str, Any]], last_resolution: dict[str, Any] | None
+    ) -> dict[str, Any]:
         if not pending:
             return {
-                "acknowledgement": "Thank you. Your CV questionnaire is complete.",
+                "transition": "Thank you. Your CV questionnaire is complete.",
                 "next_question_id": None,
                 "question": None,
             }
         item = pending[0]
+        if last_resolution is None:
+            transition = "Let's build your CV together."
+        elif last_resolution.get("status") == "skipped":
+            transition = "No problem, we can move on."
+        else:
+            transition = "Thanks, I've noted that."
         return {
-            "acknowledgement": "Thanks, I've noted that.",
+            "transition": transition,
             "next_question_id": item["id"],
             "question": item["question"],
         }
 
-    def _save(self, session: InterviewSession) -> None:
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        path = self.data_dir / f"{session.session_id}.json"
-        payload = {
-            "session_id": session.session_id,
-            "current_question_id": session.current_question_id,
-            "answers": session.answers,
+    def _apply_selection(
+        self, session: InterviewSession, selected: dict[str, Any]
+    ) -> tuple[str | None, str, bool]:
+        pending = session.pending_items()
+        next_item = self._validated_next_item(selected.get("next_question_id"), pending)
+        transition = str(selected.get("transition") or "").strip()
+        if next_item is None:
+            session.current_question_id = None
+            session.current_question_text = None
+            response = transition or "Thank you. Your CV questionnaire is complete."
+            return None, response, True
+        proposed_question = str(selected.get("question") or "").strip()
+        question = proposed_question or next_item["question"]
+        session.current_question_id = next_item["id"]
+        session.current_question_text = question
+        response = f"{transition} {question}".strip()
+        return question, response, False
+
+    @staticmethod
+    def _question_number(question_id: str) -> int:
+        return next(
+            index for index, item in enumerate(QUESTIONNAIRE, start=1) if item["id"] == question_id
+        )
+
+    @staticmethod
+    def _turn_record(
+        session: InterviewSession,
+        current: dict[str, Any],
+        asked_question: str,
+        transcript: str,
+        outcome: str,
+        normalized_value: str | None,
+        assistant_response: str | None,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        record = {
+            "turn_number": len(session.turns) + 1,
+            "question_id": current["id"],
+            "attribute": current["title"],
+            "question_text": asked_question,
+            "raw_transcript": transcript,
+            "outcome": outcome,
+            "normalized_value": normalized_value,
+            "assistant_response": assistant_response,
         }
-        temporary = path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-        temporary.replace(path)
+        if error:
+            record["error"] = error
+        return record
+
+    def _save(self, session: InterviewSession) -> None:
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            path = self.data_dir / f"{session.session_id}.json"
+            payload = {
+                "version": 2,
+                "session_id": session.session_id,
+                "current_question_id": session.current_question_id,
+                "current_question_text": session.current_question_text,
+                "profile": session.profile,
+                "turns": session.turns,
+            }
+            temporary = path.with_suffix(".tmp")
+            temporary.write_text(
+                json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            temporary.replace(path)
+        except OSError as exc:
+            raise InterviewError(f"The interview could not be saved locally: {exc}") from exc

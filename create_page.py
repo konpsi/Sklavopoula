@@ -50,7 +50,7 @@ CREATE_PAGE = r"""<!doctype html>
 </head>
 <body>
   <main>
-    <p id="question">Preparing your first question…</p>
+    <p id="question">Preparing your first question...</p>
     <button id="voice-button" type="button" disabled aria-describedby="status">Please wait</button>
     <p id="status" role="status" aria-live="polite"></p>
   </main>
@@ -63,6 +63,7 @@ CREATE_PAGE = r"""<!doctype html>
     let stream;
     let chunks = [];
     let pendingSpeech = null;
+    let pendingWarning = "";
     let recording = false;
 
     function showError(message) {
@@ -106,8 +107,9 @@ CREATE_PAGE = r"""<!doctype html>
         const response = await api("/api/interview/start", { method: "POST" });
         const turn = await response.json();
         question.textContent = turn.question;
+        pendingWarning = turn.warning || "";
         status.textContent = "The interviewer is speaking";
-        pendingSpeech = turn.question;
+        pendingSpeech = turn.response || turn.question;
         try {
           await speak(pendingSpeech);
           pendingSpeech = null;
@@ -116,7 +118,7 @@ CREATE_PAGE = r"""<!doctype html>
         }
         button.disabled = false;
         button.textContent = pendingSpeech ? "Hear question" : "Tap to speak";
-        if (!pendingSpeech) status.textContent = "";
+        if (!pendingSpeech) status.textContent = pendingWarning;
       } catch (error) {
         question.textContent = "Voice interview unavailable";
         showError(error.message);
@@ -144,12 +146,12 @@ CREATE_PAGE = r"""<!doctype html>
       button.classList.add("recording");
       button.textContent = "Tap to stop";
       status.className = "";
-      status.textContent = "Listening…";
+      status.textContent = "Listening...";
     }
 
     async function finishRecording() {
       button.disabled = true;
-      button.textContent = "Thinking…";
+      button.textContent = "Thinking...";
       status.textContent = "Transcribing locally";
       const stopped = new Promise(resolve => recorder.addEventListener("stop", resolve, { once: true }));
       recorder.stop();
@@ -187,7 +189,7 @@ CREATE_PAGE = r"""<!doctype html>
           pendingSpeech = null;
           button.disabled = false;
           button.textContent = "Tap to speak";
-          status.textContent = "";
+          status.textContent = pendingWarning;
         } else if (recording) {
           await finishRecording();
         } else {

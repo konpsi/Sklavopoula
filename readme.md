@@ -43,7 +43,11 @@ Windows uses its installed SAPI voices.
 - Temporary microphone recordings are deleted immediately after transcription.
 
 `OPENROUTER_MODEL` defaults to `openrouter/free`, the zero-cost starter router. It can be
-changed to any OpenRouter model slug without code changes.
+changed to any OpenRouter model slug without code changes. OpenRouter requests require
+strict JSON-schema support and use response healing, so the free router selects a
+compatible provider. If a provider or API request still fails, the page and server
+terminal show the sanitized OpenRouter error while the questionnaire safely continues
+in its defined order.
 
 ## Tests
 
