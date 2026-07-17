@@ -1,11 +1,21 @@
+import json
+import mimetypes
 import os
 import re
-import mimetypes
+import tempfile
+import urllib.error
+import urllib.request
+import uuid
 from email import policy
 from email.parser import BytesParser
+from html.parser import HTMLParser
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import urlparse
+
+from create_page import CREATE_PAGE
+from voice_interview import InterviewError, VoiceInterviewService
 
 
 HOST = "127.0.0.1"
@@ -13,6 +23,10 @@ PORT = int(os.environ.get("PORT", "8080"))
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploaded_cv")
 ALLOWED_CV_EXTENSIONS = {".pdf", ".doc", ".docx", ".txt"}
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024
+MAX_AUDIO_SIZE = 15 * 1024 * 1024
+INTERVIEW_DATA_DIR = os.path.join(os.path.dirname(__file__), "interview_data")
+INTERVIEW_SERVICE = VoiceInterviewService(INTERVIEW_DATA_DIR)
+MAX_COMPANY_CONTEXT_CHARS = 12000
 
 
 HOME_PAGE = """<!doctype html>
@@ -70,7 +84,7 @@ HOME_PAGE = """<!doctype html>
 
     .hero,
     .side-panel,
-    .next-panel {
+    .process-panel {
       border: 1px solid var(--line);
       border-radius: 0.75rem;
       background: rgba(255, 255, 255, 0.9);
@@ -266,18 +280,18 @@ HOME_PAGE = """<!doctype html>
       line-height: 1.35;
     }
 
-    .next-panel {
+    .process-panel {
       margin-top: 1.5rem;
       padding: 1.25rem;
     }
 
-    .next-list {
+    .process-list {
       display: grid;
       gap: 0.75rem;
       margin-top: 0.9rem;
     }
 
-    .next-item {
+    .process-item {
       display: flex;
       gap: 0.75rem;
       align-items: flex-start;
@@ -287,7 +301,7 @@ HOME_PAGE = """<!doctype html>
       background: #ffffff;
     }
 
-    .next-dot {
+    .process-step {
       width: 0.7rem;
       height: 0.7rem;
       flex: 0 0 auto;
@@ -296,12 +310,12 @@ HOME_PAGE = """<!doctype html>
       background: var(--amber);
     }
 
-    .next-item strong {
+    .process-item strong {
       display: block;
       margin-bottom: 0.2rem;
     }
 
-    .next-item span {
+    .process-item span {
       color: var(--muted);
       line-height: 1.45;
     }
@@ -374,21 +388,28 @@ HOME_PAGE = """<!doctype html>
           </div>
         </div>
 
-        <section class="next-panel" aria-labelledby="next-title">
-          <h2 class="panel-title" id="next-title">Good next steps</h2>
-          <div class="next-list">
-            <div class="next-item">
-              <span class="next-dot" aria-hidden="true"></span>
+        <section class="process-panel" aria-labelledby="process-title">
+          <h2 class="panel-title" id="process-title">Create CV flow</h2>
+          <div class="process-list">
+            <div class="process-item">
+              <span class="process-step" aria-hidden="true"></span>
               <div>
-                <strong>Choose a target company</strong>
-                <span>Add the company homepage later so the CV and interview can be aimed at a real opportunity.</span>
+                <strong>Optional company website</strong>
+                <span>Paste a company link before the voice questions if you want the AI-created CV personalized for that company.</span>
               </div>
             </div>
-            <div class="next-item">
-              <span class="next-dot" aria-hidden="true"></span>
+            <div class="process-item">
+              <span class="process-step" aria-hidden="true"></span>
               <div>
-                <strong>Practice from the same CV</strong>
-                <span>Using one current CV keeps interview feedback tied to the version employers will see.</span>
+                <strong>Voice-guided questions</strong>
+                <span>The AI asks for your background, experience, skills, education, projects, and goals.</span>
+              </div>
+            </div>
+            <div class="process-item">
+              <span class="process-step" aria-hidden="true"></span>
+              <div>
+                <strong>Personalized CV output</strong>
+                <span>If a link was provided, the CV uses the page content as company context. If not, it stays general.</span>
               </div>
             </div>
           </div>
@@ -536,6 +557,69 @@ def render_home_page():
     )
 
 
+class PageTextExtractor(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self._hidden_depth = 0
+        self.parts = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"script", "style", "noscript", "svg"}:
+            self._hidden_depth += 1
+
+    def handle_endtag(self, tag):
+        if tag in {"script", "style", "noscript", "svg"} and self._hidden_depth:
+            self._hidden_depth -= 1
+
+    def handle_data(self, data):
+        if self._hidden_depth:
+            return
+        cleaned = " ".join(data.split())
+        if cleaned:
+            self.parts.append(cleaned)
+
+    def text(self):
+        return " ".join(self.parts)
+
+
+def fetch_company_context(url):
+    clean_url = (url or "").strip()
+    if not clean_url:
+        return None
+
+    parsed = urlparse(clean_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise InterviewError("Please enter a full company website URL, starting with http:// or https://.")
+
+    request = urllib.request.Request(
+        clean_url,
+        headers={"User-Agent": "Local CV Builder/1.0"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=12) as response:
+            content_type = response.headers.get("Content-Type", "")
+            if "text/html" not in content_type and "text/plain" not in content_type:
+                raise InterviewError("The company link did not return readable page text.")
+            raw = response.read(512 * 1024)
+    except urllib.error.URLError as exc:
+        raise InterviewError(f"The company website could not be read: {exc}") from exc
+
+    text = raw.decode("utf-8", errors="replace")
+    if "text/html" in content_type:
+        parser = PageTextExtractor()
+        parser.feed(text)
+        text = parser.text()
+    text = " ".join(text.split())
+    if not text:
+        raise InterviewError("The company website did not contain readable text.")
+
+    return {
+        "url": clean_url,
+        "content": text[:MAX_COMPANY_CONTEXT_CHARS],
+    }
+
+
 class AppHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
@@ -546,14 +630,8 @@ class AppHandler(BaseHTTPRequestHandler):
             self.serve_current_cv()
             return
         if path == "/create":
-            self.respond(
-                200,
-                MESSAGE_PAGE.format(
-                    title="Create CV",
-                    heading="Create CV",
-                    message="This is where the AI voice-guided CV creation flow will start.",
-                ),
-            )
+            session_id, cookie_header = self.session_id()
+            self.respond(200, CREATE_PAGE, extra_headers={"Set-Cookie": cookie_header})
             return
         if path == "/interview":
             self.respond(
@@ -569,6 +647,27 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if path == "/api/interview/start":
+            session_id, cookie_header = self.session_id()
+            try:
+                payload = {}
+                raw_body = self.read_request_body(16 * 1024)
+                if raw_body:
+                    payload = json.loads(raw_body.decode("utf-8"))
+                company_context = fetch_company_context(str(payload.get("company_url", "")))
+                result = INTERVIEW_SERVICE.start(session_id, company_context)
+                self.respond_json(200, result, {"Set-Cookie": cookie_header})
+            except (InterviewError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                self.respond_json(400, {"error": str(exc)}, {"Set-Cookie": cookie_header})
+            except ValueError as exc:
+                self.respond_json(413, {"error": str(exc)}, {"Set-Cookie": cookie_header})
+            return
+        if path == "/api/interview/answer":
+            self.handle_interview_answer()
+            return
+        if path == "/api/interview/speak":
+            self.handle_interview_speech()
+            return
         if path == "/upload":
             result = self.save_uploaded_cv()
             if not result["ok"]:
@@ -595,6 +694,45 @@ class AppHandler(BaseHTTPRequestHandler):
             )
             return
         self.respond(404, "Not found", "text/plain")
+
+    def handle_interview_answer(self):
+        session_id, cookie_header = self.session_id()
+        try:
+            audio = self.read_request_body(MAX_AUDIO_SIZE)
+            if not audio:
+                raise InterviewError("No microphone audio was received.")
+            content_type = self.headers.get("Content-Type", "").split(";", 1)[0].lower()
+            suffix = {
+                "audio/webm": ".webm",
+                "audio/ogg": ".ogg",
+                "audio/wav": ".wav",
+                "audio/mp4": ".m4a",
+            }.get(content_type, ".audio")
+            temp_path = ""
+            try:
+                with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as audio_file:
+                    audio_file.write(audio)
+                    temp_path = audio_file.name
+                result = INTERVIEW_SERVICE.answer(session_id, temp_path)
+            finally:
+                if temp_path:
+                    Path(temp_path).unlink(missing_ok=True)
+            self.respond_json(200, result, {"Set-Cookie": cookie_header})
+        except InterviewError as exc:
+            self.respond_json(400, {"error": str(exc)}, {"Set-Cookie": cookie_header})
+        except ValueError as exc:
+            self.respond_json(413, {"error": str(exc)}, {"Set-Cookie": cookie_header})
+
+    def handle_interview_speech(self):
+        try:
+            raw_body = self.read_request_body(16 * 1024)
+            payload = json.loads(raw_body.decode("utf-8"))
+            audio = INTERVIEW_SERVICE.synthesize(str(payload.get("text", "")))
+            self.respond_bytes(200, audio, "audio/wav")
+        except (InterviewError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            self.respond_json(400, {"error": str(exc)})
+        except ValueError as exc:
+            self.respond_json(413, {"error": str(exc)})
 
     def save_uploaded_cv(self):
         content_type = self.headers.get("Content-Type", "")
@@ -685,13 +823,41 @@ class AppHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(content)
 
-    def respond(self, status, body, content_type="text/html; charset=utf-8"):
-        encoded = body.encode("utf-8")
+    def read_request_body(self, maximum_size):
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError as exc:
+            raise InterviewError("The request size could not be read.") from exc
+        if content_length <= 0:
+            return b""
+        if content_length > maximum_size:
+            raise ValueError(f"The request must be smaller than {maximum_size // (1024 * 1024) or 1} MB.")
+        return self.rfile.read(content_length)
+
+    def session_id(self):
+        cookie = self.headers.get("Cookie", "")
+        match = re.search(r"(?:^|;\s*)cv_session=([a-f0-9]{32})(?:;|$)", cookie)
+        session_id = match.group(1) if match else uuid.uuid4().hex
+        cookie_header = f"cv_session={session_id}; Path=/; HttpOnly; SameSite=Strict"
+        return session_id, cookie_header
+
+    def respond_json(self, status, payload, extra_headers=None):
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.respond_bytes(status, body, "application/json; charset=utf-8", extra_headers)
+
+    def respond_bytes(self, status, body, content_type, extra_headers=None):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(encoded)))
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
-        self.wfile.write(encoded)
+        self.wfile.write(body)
+
+    def respond(self, status, body, content_type="text/html; charset=utf-8", extra_headers=None):
+        encoded = body.encode("utf-8")
+        self.respond_bytes(status, encoded, content_type, extra_headers)
 
     def log_message(self, format, *args):
         return
