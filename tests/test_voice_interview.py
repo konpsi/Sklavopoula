@@ -36,14 +36,22 @@ class FakeLLM:
         self.evaluation_calls = []
         self.selection_calls = []
 
-    def evaluate_answer(self, current, asked_question, transcript, attempts):
-        self.evaluation_calls.append((current, asked_question, transcript, attempts))
+    def evaluate_answer(
+        self, current, asked_question, transcript, attempts, company_context=None
+    ):
+        self.evaluation_calls.append(
+            (current, asked_question, transcript, attempts, company_context)
+        )
         if len(self.evaluations) > 1:
             return self.evaluations.pop(0)
         return dict(self.evaluations[0])
 
-    def select_next_question(self, profile, pending, last_resolution):
-        self.selection_calls.append((dict(profile), list(pending), last_resolution))
+    def select_next_question(
+        self, profile, pending, last_resolution, company_context=None
+    ):
+        self.selection_calls.append(
+            (dict(profile), list(pending), last_resolution, company_context)
+        )
         if not pending:
             return {
                 "transition": "Your questionnaire is complete.",
@@ -62,16 +70,24 @@ class FakeLLM:
 
 
 class FailingEvaluatorLLM(FakeLLM):
-    def evaluate_answer(self, current, asked_question, transcript, attempts):
-        self.evaluation_calls.append((current, asked_question, transcript, attempts))
+    def evaluate_answer(
+        self, current, asked_question, transcript, attempts, company_context=None
+    ):
+        self.evaluation_calls.append(
+            (current, asked_question, transcript, attempts, company_context)
+        )
         raise InterviewError("OpenRouter HTTP 429: rate limit reached")
 
 
 class FailingSecondSelectorLLM(FakeLLM):
-    def select_next_question(self, profile, pending, last_resolution):
+    def select_next_question(
+        self, profile, pending, last_resolution, company_context=None
+    ):
         if self.selection_calls:
             raise InterviewError("OpenRouter HTTP 503: provider unavailable")
-        return super().select_next_question(profile, pending, last_resolution)
+        return super().select_next_question(
+            profile, pending, last_resolution, company_context
+        )
 
 
 class VoiceInterviewServiceTests(unittest.TestCase):
@@ -95,6 +111,16 @@ class VoiceInterviewServiceTests(unittest.TestCase):
             self.assertEqual(saved["version"], 2)
             self.assertEqual(saved["profile"], {})
             self.assertEqual(saved["turns"], [])
+
+    def test_start_saves_company_context_when_provided(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = self.make_service(directory)
+            context = {"url": "https://example.com", "content": "Example company builds tools."}
+            turn = service.start("f" * 32, context)
+
+            self.assertTrue(turn["company_context"])
+            saved = json.loads(Path(directory, f"{'f' * 32}.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["company_context"], context)
 
     def test_captured_answer_saves_normalized_value_and_raw_turn_then_selects(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -191,6 +217,26 @@ class VoiceInterviewServiceTests(unittest.TestCase):
             self.assertEqual(service.sessions[session_id].current_question_id, "professional_title")
             self.assertEqual(turn["question"], QUESTIONNAIRE[1]["question"])
             self.assertIn("HTTP 503", turn["warning"])
+
+    def test_invalid_selector_id_cannot_attach_question_to_wrong_item(self):
+        class InvalidSelectorLLM(FakeLLM):
+            def select_next_question(
+                self, profile, pending, last_resolution, company_context=None
+            ):
+                self.selection_calls.append(
+                    (dict(profile), list(pending), last_resolution, company_context)
+                )
+                return {
+                    "transition": "Moving on.",
+                    "next_question_id": "not_allowed",
+                    "question": "Tell me something outside the questionnaire.",
+                }
+
+        with tempfile.TemporaryDirectory() as directory:
+            service = self.make_service(directory, InvalidSelectorLLM())
+            turn = service.start("4" * 32)
+
+            self.assertEqual(turn["question"], QUESTIONNAIRE[0]["question"])
 
     def test_last_resolved_item_completes_questionnaire(self):
         with tempfile.TemporaryDirectory() as directory:

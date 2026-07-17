@@ -1,9 +1,13 @@
 # Local Voice CV Builder
 
-The existing **Create CV** action opens a minimal, voice-guided questionnaire. Audio is
-transcribed on the machine with `faster-whisper`, only the transcript and current
-questionnaire context are sent to OpenRouter, and the response is spoken locally using
-the operating system voice through `pyttsx3`.
+The existing **Create CV** action first asks for an optional company website URL, then
+opens a minimal, voice-guided questionnaire. When a company URL is provided, the app
+fetches readable text from that page and sends it to OpenRouter as context so the
+AI-created CV can be personalized for that company. If the field is left blank, the CV
+flow stays general. Audio is transcribed on the machine with `faster-whisper`, only the
+transcript, questionnaire context, and optional company page context are sent to
+OpenRouter, and the response is spoken locally using the operating system voice through
+`pyttsx3`.
 
 ## Run with Python 3.10
 
@@ -21,15 +25,16 @@ repository:
 
 ```powershell
 $env:OPENROUTER_API_KEY = "your-openrouter-key"
-$env:OPENROUTER_MODEL = "openrouter/free"
+$env:OPENROUTER_MODEL = "google/gemini-2.5-flash-lite"
 python app.py
 ```
 
-Open <http://127.0.0.1:8080> and choose **Create CV**. Allow microphone access when the
-browser asks. The first Whisper run downloads the selected model; after that, STT
-inference is local. The default `tiny.en` model is intentionally small for an MVP. Set
-`WHISPER_MODEL=small.en` for better English accuracy, or `WHISPER_MODEL=small` and
-`STT_LANGUAGE` for another language.
+Open <http://127.0.0.1:8080> and choose **Create CV**. Add a company website if the CV
+should be personalized, or leave the field blank for a general CV, then start the voice
+questions. Allow microphone access when the browser asks. The first Whisper run
+downloads the selected model; after that, STT inference is local. The default `tiny.en`
+model is intentionally small for an MVP. Set `WHISPER_MODEL=small.en` for better English
+accuracy, or `WHISPER_MODEL=small` and `STT_LANGUAGE` for another language.
 
 On Linux, `pyttsx3` also needs an installed local speech engine such as `espeak-ng`.
 Windows uses its installed SAPI voices.
@@ -39,13 +44,17 @@ Windows uses its installed SAPI voices.
 - `questionnaire.py` is the editable general CV questionnaire outline.
 - `voice_interview.py` owns local STT/TTS, OpenRouter calls, validation, and answer storage.
 - `create_page.py` contains the intentionally minimal one-button browser UI.
-- Structured answers are written to `interview_data/<session-id>.json` and are ignored by Git.
+- Each reply is first evaluated as `captured`, `clarify`, or `skipped`. Clarifications stay
+  on the same item; captured and skipped items are saved before a second LLM call chooses
+  and phrases the next question.
+- `interview_data/<session-id>.json` keeps clean CV data under `profile` and the verbatim
+  conversational audit trail under `turns`. These local files are ignored by Git.
 - Temporary microphone recordings are deleted immediately after transcription.
 
-`OPENROUTER_MODEL` defaults to `openrouter/free`, the zero-cost starter router. It can be
-changed to any OpenRouter model slug without code changes. OpenRouter requests require
-strict JSON-schema support and use response healing, so the free router selects a
-compatible provider. If a provider or API request still fails, the page and server
+`OPENROUTER_MODEL` defaults to `google/gemini-2.5-flash-lite` for consistent, inexpensive
+evaluation and question selection. It can be changed to any OpenRouter model slug without
+code changes. OpenRouter requests require
+strict JSON-schema support and use response healing. If a provider or API request still fails, the page and server
 terminal show the sanitized OpenRouter error while the questionnaire safely continues
 in its defined order.
 

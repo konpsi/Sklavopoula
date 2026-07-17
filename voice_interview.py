@@ -16,7 +16,7 @@ from questionnaire import QUESTIONNAIRE, QUESTION_BY_ID
 
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "openrouter/free"
+DEFAULT_MODEL = "google/gemini-2.5-flash-lite"
 
 
 class InterviewError(RuntimeError):
@@ -31,6 +31,7 @@ class InterviewSession:
     profile: dict[str, dict[str, Any]] = field(default_factory=dict)
     turns: list[dict[str, Any]] = field(default_factory=list)
     clarification_attempts: dict[str, int] = field(default_factory=dict)
+    company_context: dict[str, str] | None = None
 
     @property
     def resolved_ids(self) -> set[str]:
@@ -55,6 +56,7 @@ class OpenRouterClient:
         asked_question: str,
         transcript: str,
         clarification_attempts: int,
+        company_context: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         system_prompt = (
             "You evaluate one spoken reply in a voice-guided CV interview. Decide whether the "
@@ -68,7 +70,8 @@ class OpenRouterClient:
             "transcript, without guessing, and assistant_reply must be null. For clarify, "
             "normalized_value must be null and assistant_reply must directly answer the user's "
             "need, then ask for the same information in a simpler way. For skipped, both fields "
-            "must be null. Keep spoken replies brief."
+            "must be null. Keep spoken replies brief. "
+            f"{self._company_instruction(company_context)}"
         )
         user_payload = {
             "questionnaire_item": current_item,
@@ -76,6 +79,7 @@ class OpenRouterClient:
             "raw_transcript": transcript,
             "previous_clarification_attempts": clarification_attempts,
             "clarification_guidance": current_item.get("clarification"),
+            "company_context": company_context,
         }
         content = self._completion(
             [
@@ -112,6 +116,7 @@ class OpenRouterClient:
         profile: dict[str, dict[str, Any]],
         pending_items: list[dict[str, Any]],
         last_resolution: dict[str, Any] | None,
+        company_context: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         if not self.configured:
             raise InterviewError("OPENROUTER_API_KEY is not configured on the server.")
@@ -132,12 +137,14 @@ class OpenRouterClient:
             "then conversationally ask one question that covers the chosen item's goal. Never ask "
             "for an item outside pending_items and never invent profile facts. If this is the first "
             "question, transition must be a short welcome. If pending_items is empty, return a brief "
-            "completion transition and null for next_question_id and question."
+            "completion transition and null for next_question_id and question. "
+            f"{self._company_instruction(company_context)}"
         )
         user_payload = {
             "saved_profile": profile,
             "last_resolution": last_resolution,
             "pending_items": allowed,
+            "company_context": company_context,
         }
         pending_ids = [item["id"] for item in pending_items]
         content = self._completion(
@@ -290,6 +297,17 @@ class OpenRouterClient:
             raise json.JSONDecodeError("No JSON object", cleaned, 0)
         return json.loads(cleaned[start : end + 1])
 
+    @staticmethod
+    def _company_instruction(company_context: dict[str, str] | None) -> str:
+        if not company_context:
+            return (
+                "No company website context was provided, so gather information for a general CV."
+            )
+        return (
+            "Company website context is available. Use it to ask questions that help create a CV "
+            "personalized to that company, while still collecting the questionnaire fields."
+        )
+
 
 class LocalTranscriber:
     """Lazy faster-whisper wrapper; model inference stays on this machine."""
@@ -378,16 +396,21 @@ class VoiceInterviewService:
     def configured(self) -> bool:
         return self.llm.configured
 
-    def start(self, session_id: str) -> dict[str, Any]:
+    def start(
+        self, session_id: str, company_context: dict[str, str] | None = None
+    ) -> dict[str, Any]:
         if not self.configured:
             raise InterviewError("Set OPENROUTER_API_KEY before starting the voice interview.")
-        session = InterviewSession(session_id=session_id)
+        session = InterviewSession(session_id=session_id, company_context=company_context)
         with self._sessions_lock:
             self.sessions[session_id] = session
         warning = None
         try:
             selected = self.llm.select_next_question(
-                session.profile, session.pending_items(), last_resolution=None
+                session.profile,
+                session.pending_items(),
+                last_resolution=None,
+                company_context=session.company_context,
             )
         except InterviewError as exc:
             print(f"[OpenRouter] {exc}", flush=True)
@@ -402,6 +425,7 @@ class VoiceInterviewService:
             "question": question,
             "response": spoken_response,
             "complete": complete,
+            "company_context": bool(company_context),
         }
         if warning:
             result["warning"] = warning
@@ -416,7 +440,13 @@ class VoiceInterviewService:
         asked_question = session.current_question_text or current["question"]
         attempts = session.clarification_attempts.get(current["id"], 0)
         try:
-            evaluation = self.llm.evaluate_answer(current, asked_question, transcript, attempts)
+            evaluation = self.llm.evaluate_answer(
+                current,
+                asked_question,
+                transcript,
+                attempts,
+                company_context=session.company_context,
+            )
         except InterviewError as exc:
             print(f"[OpenRouter] {exc}", flush=True)
             reply = "I couldn't reliably process that response. Please say it again."
@@ -513,7 +543,12 @@ class VoiceInterviewService:
         warning = None
         pending = session.pending_items()
         try:
-            selected = self.llm.select_next_question(session.profile, pending, last_resolution)
+            selected = self.llm.select_next_question(
+                session.profile,
+                pending,
+                last_resolution,
+                company_context=session.company_context,
+            )
         except InterviewError as exc:
             print(f"[OpenRouter] {exc}", flush=True)
             selected = self._fallback_selection(pending, last_resolution)
@@ -593,7 +628,12 @@ class VoiceInterviewService:
             response = transition or "Thank you. Your CV questionnaire is complete."
             return None, response, True
         proposed_question = str(selected.get("question") or "").strip()
-        question = proposed_question or next_item["question"]
+        proposed_id = selected.get("next_question_id")
+        question = (
+            proposed_question
+            if str(proposed_id) == next_item["id"] and proposed_question
+            else next_item["question"]
+        )
         session.current_question_id = next_item["id"]
         session.current_question_text = question
         response = f"{transition} {question}".strip()
@@ -641,6 +681,7 @@ class VoiceInterviewService:
                 "current_question_text": session.current_question_text,
                 "profile": session.profile,
                 "turns": session.turns,
+                "company_context": session.company_context,
             }
             temporary = path.with_suffix(".tmp")
             temporary.write_text(

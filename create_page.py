@@ -1,13 +1,21 @@
-"""Minimal browser UI for the voice CV interview."""
+"""Browser UI for the AI-assisted CV creation flow."""
 
 CREATE_PAGE = r"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Voice CV interview</title>
+  <title>Create CV</title>
   <style>
-    :root { color-scheme: light; --blue: #2f80ed; --text: #172033; --muted: #667085; }
+    :root {
+      color-scheme: light;
+      --blue: #2f80ed;
+      --blue-soft: #eff7ff;
+      --green: #12805c;
+      --line: #d8e2ee;
+      --text: #172033;
+      --muted: #667085;
+    }
     * { box-sizing: border-box; }
     body {
       margin: 0;
@@ -19,7 +27,78 @@ CREATE_PAGE = r"""<!doctype html>
       color: var(--text);
       background: #fbfdff;
     }
-    main { width: min(100%, 34rem); text-align: center; }
+    main { width: min(100%, 42rem); }
+    .setup,
+    .interview {
+      border: 1px solid var(--line);
+      border-radius: .75rem;
+      background: #fff;
+      padding: 1.5rem;
+      box-shadow: 0 22px 60px rgba(20, 68, 128, .08);
+    }
+    .interview { text-align: center; }
+    .hidden { display: none; }
+    h1 {
+      margin: 0;
+      font-size: 2rem;
+      line-height: 1.1;
+      letter-spacing: 0;
+    }
+    p {
+      margin: .8rem 0 0;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+    label {
+      display: block;
+      margin-top: 1.3rem;
+      font-weight: 700;
+    }
+    input {
+      width: 100%;
+      min-height: 3rem;
+      margin-top: .45rem;
+      padding: .75rem .9rem;
+      border: 1px solid var(--line);
+      border-radius: .6rem;
+      color: var(--text);
+      font: inherit;
+    }
+    input:focus {
+      border-color: #9dc2ea;
+      outline: 3px solid var(--blue-soft);
+    }
+    .actions {
+      display: flex;
+      gap: .75rem;
+      flex-wrap: wrap;
+      margin-top: 1.3rem;
+    }
+    .button {
+      appearance: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 3rem;
+      padding: .75rem 1rem;
+      border: 1px solid #a9d2ff;
+      border-radius: .6rem;
+      background: var(--blue-soft);
+      color: #1759a8;
+      cursor: pointer;
+      font: inherit;
+      font-weight: 700;
+      text-decoration: none;
+    }
+    .button.primary {
+      border-color: var(--blue);
+      background: var(--blue);
+      color: #fff;
+    }
+    .button:disabled {
+      cursor: wait;
+      opacity: .65;
+    }
     #question {
       min-height: 4.5rem;
       margin: 0 0 2.5rem;
@@ -46,16 +125,39 @@ CREATE_PAGE = r"""<!doctype html>
     #voice-button:disabled { cursor: wait; opacity: .6; transform: none; }
     #status { min-height: 1.5rem; margin: 1.5rem 0 0; color: var(--muted); }
     #status.error { color: #b42318; }
+    .context {
+      color: var(--green);
+      font-weight: 700;
+    }
   </style>
 </head>
 <body>
   <main>
-    <p id="question">Preparing your first question...</p>
-    <button id="voice-button" type="button" disabled aria-describedby="status">Please wait</button>
-    <p id="status" role="status" aria-live="polite"></p>
+    <section class="setup" id="setup" aria-labelledby="setup-title">
+      <h1 id="setup-title">Create your CV</h1>
+      <p>Optionally add a company website first. The AI will read that page and use it to personalize the CV. Leave it blank for a general CV.</p>
+      <label for="company-url">Company website</label>
+      <input id="company-url" type="url" placeholder="https://example.com">
+      <div class="actions">
+        <button class="button primary" id="start-button" type="button">Start creating CV</button>
+        <a class="button" href="/">Home</a>
+      </div>
+      <p id="setup-status" role="status" aria-live="polite"></p>
+    </section>
+
+    <section class="interview hidden" id="interview" aria-live="polite">
+      <p id="question">Preparing your first question...</p>
+      <button id="voice-button" type="button" disabled aria-describedby="status">Please wait</button>
+      <p id="status" role="status" aria-live="polite"></p>
+    </section>
   </main>
 
   <script>
+    const setup = document.querySelector("#setup");
+    const interview = document.querySelector("#interview");
+    const startButton = document.querySelector("#start-button");
+    const companyUrl = document.querySelector("#company-url");
+    const setupStatus = document.querySelector("#setup-status");
     const button = document.querySelector("#voice-button");
     const question = document.querySelector("#question");
     const status = document.querySelector("#status");
@@ -64,7 +166,18 @@ CREATE_PAGE = r"""<!doctype html>
     let chunks = [];
     let pendingSpeech = null;
     let pendingWarning = "";
+    let companyContextAdded = false;
     let recording = false;
+
+    function showIdleStatus() {
+      if (pendingWarning) {
+        status.textContent = pendingWarning;
+      } else if (companyContextAdded) {
+        status.innerHTML = "<span class=\"context\">Company context added</span>";
+      } else {
+        status.textContent = "";
+      }
+    }
 
     function showError(message) {
       status.textContent = message;
@@ -103,12 +216,21 @@ CREATE_PAGE = r"""<!doctype html>
     }
 
     async function startInterview() {
+      startButton.disabled = true;
+      setupStatus.textContent = companyUrl.value.trim() ? "Reading company website..." : "Starting voice questions...";
       try {
-        const response = await api("/api/interview/start", { method: "POST" });
+        const response = await api("/api/interview/start", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ company_url: companyUrl.value.trim() })
+        });
         const turn = await response.json();
+        setup.classList.add("hidden");
+        interview.classList.remove("hidden");
         question.textContent = turn.question;
         pendingWarning = turn.warning || "";
-        status.textContent = "The interviewer is speaking";
+        companyContextAdded = Boolean(turn.company_context);
+        status.textContent = companyContextAdded ? "Company context added" : "The interviewer is speaking";
         pendingSpeech = turn.response || turn.question;
         try {
           await speak(pendingSpeech);
@@ -118,10 +240,10 @@ CREATE_PAGE = r"""<!doctype html>
         }
         button.disabled = false;
         button.textContent = pendingSpeech ? "Hear question" : "Tap to speak";
-        if (!pendingSpeech) status.textContent = pendingWarning;
+        if (!pendingSpeech) showIdleStatus();
       } catch (error) {
-        question.textContent = "Voice interview unavailable";
-        showError(error.message);
+        setupStatus.textContent = error.message;
+        startButton.disabled = false;
       }
     }
 
@@ -181,6 +303,8 @@ CREATE_PAGE = r"""<!doctype html>
       }
     }
 
+    startButton.addEventListener("click", startInterview);
+
     button.addEventListener("click", async () => {
       try {
         if (pendingSpeech) {
@@ -189,7 +313,7 @@ CREATE_PAGE = r"""<!doctype html>
           pendingSpeech = null;
           button.disabled = false;
           button.textContent = "Tap to speak";
-          status.textContent = pendingWarning;
+          showIdleStatus();
         } else if (recording) {
           await finishRecording();
         } else {
@@ -202,8 +326,6 @@ CREATE_PAGE = r"""<!doctype html>
         showError(error.message);
       }
     });
-
-    startInterview();
   </script>
 </body>
 </html>
