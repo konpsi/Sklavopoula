@@ -257,6 +257,20 @@ class OpenRouterClient:
         except (KeyError, IndexError, TypeError) as exc:
             raise InterviewError("OpenRouter returned an unexpected response.") from exc
 
+    def complete_json(
+        self,
+        messages: list[dict[str, str]],
+        max_tokens: int,
+        schema_name: str,
+        schema: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Run one strict structured-output request and return its JSON object."""
+        content = self._completion(messages, max_tokens, schema_name, schema)
+        try:
+            return self._parse_json_object(content)
+        except json.JSONDecodeError as exc:
+            raise InterviewError("OpenRouter returned an unexpected response.") from exc
+
     @classmethod
     def _http_error_detail(cls, exc: urllib.error.HTTPError) -> str:
         raw = exc.read().decode("utf-8", errors="replace")

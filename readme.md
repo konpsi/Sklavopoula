@@ -42,6 +42,23 @@ On Windows, some local speech/transcription dependency combinations can load dup
 OpenMP runtimes. The app sets `KMP_DUPLICATE_LIB_OK=TRUE` by default for local
 development so the process can continue.
 
+## Mock interviews
+
+After creating or uploading a CV, choose **Start interview** on the home page. Enter the
+company website and target job title. The app extracts the current CV locally, reuses the
+company-page reader, and asks the configured Gemini model to create a flexible interview
+outline. A second model call welcomes the candidate and asks the opening question.
+
+Each later turn sends the model the CV text, company-page context, job title, outline, and
+the full interview conversation so it can ask a natural follow-up or move to another
+outline topic. Microphone audio is transcribed locally and responses are spoken with the
+local operating-system voice. The only mock-interview file saved is a plain-text speaker
+transcript at `mock_interview_transcripts/<session-id>.txt`, using `Interviewer:` and
+`Candidate:` labels. The outline and source context remain in memory and are not logged.
+
+Text-based PDF, DOCX, TXT, and legacy DOC uploads can be used as interview context. Scanned
+image-only PDFs need OCR before the app can read them.
+
 ## Voice interview structure
 
 - `questionnaire.py` is the editable general CV questionnaire outline.

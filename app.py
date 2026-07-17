@@ -6,6 +6,7 @@ import tempfile
 import urllib.error
 import urllib.request
 import uuid
+import zipfile
 from email import policy
 from email.parser import BytesParser
 from html.parser import HTMLParser
@@ -13,9 +14,12 @@ from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
+from xml.etree import ElementTree
 
 from create_page import CREATE_PAGE
 from interview_feedback import InterviewFeedback, build_placeholder_feedback
+from interview_page import INTERVIEW_PAGE
+from mock_interview import MockInterviewService
 from voice_interview import InterviewError, VoiceInterviewService
 
 
@@ -26,6 +30,9 @@ ALLOWED_CV_EXTENSIONS = {".pdf", ".doc", ".docx", ".txt"}
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024
 MAX_AUDIO_SIZE = 15 * 1024 * 1024
 INTERVIEW_DATA_DIR = os.path.join(os.path.dirname(__file__), "interview_data")
+MOCK_INTERVIEW_TRANSCRIPT_DIR = os.path.join(
+    os.path.dirname(__file__), "mock_interview_transcripts"
+)
 
 
 def load_local_env():
@@ -45,7 +52,11 @@ def load_local_env():
 load_local_env()
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 INTERVIEW_SERVICE = VoiceInterviewService(INTERVIEW_DATA_DIR)
+MOCK_INTERVIEW_SERVICE = MockInterviewService(MOCK_INTERVIEW_TRANSCRIPT_DIR)
+MOCK_INTERVIEW_SERVICE.transcriber = INTERVIEW_SERVICE.transcriber
+MOCK_INTERVIEW_SERVICE.synthesizer = INTERVIEW_SERVICE.synthesizer
 MAX_COMPANY_CONTEXT_CHARS = 12000
+MAX_CV_CONTEXT_CHARS = 20000
 
 
 HOME_PAGE = """<!doctype html>
@@ -756,7 +767,90 @@ def get_current_cv():
     return max(cv_files, key=lambda item: item["updated"])
 
 
-def render_home_page():
+def extract_cv_text(path):
+    """Extract readable CV text locally for interview context."""
+    cv_path = Path(path)
+    extension = cv_path.suffix.lower()
+    try:
+        if extension == ".pdf":
+            try:
+                from pypdf import PdfReader
+            except ImportError as exc:
+                raise InterviewError(
+                    "PDF CV reading is not installed. Run: pip install -r requirements.txt"
+                ) from exc
+            reader = PdfReader(str(cv_path))
+            text = "\n".join(page.extract_text() or "" for page in reader.pages)
+        elif extension == ".docx":
+            with zipfile.ZipFile(cv_path) as archive:
+                document = ElementTree.fromstring(archive.read("word/document.xml"))
+            text = " ".join(
+                node.text or ""
+                for node in document.iter()
+                if node.tag.endswith("}t")
+            )
+        elif extension == ".txt":
+            raw = cv_path.read_bytes()
+            text = _decode_text_file(raw)
+        elif extension == ".doc":
+            raw = cv_path.read_bytes()
+            candidates = (
+                raw.decode("utf-16-le", errors="ignore"),
+                raw.decode("windows-1252", errors="ignore"),
+            )
+            text = max(candidates, key=lambda value: len(re.findall(r"[A-Za-z]{3,}", value)))
+            text = " ".join(re.findall(r"[\w@+.,:/()'& -]{4,}", text))
+        else:
+            raise InterviewError("This CV file type cannot be read for an interview.")
+    except InterviewError:
+        raise
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile, ElementTree.ParseError) as exc:
+        raise InterviewError(f"The current CV could not be read: {exc}") from exc
+
+    clean_text = " ".join(text.split())
+    if not clean_text:
+        raise InterviewError(
+            "The current CV did not contain readable text. Try a text-based PDF, DOCX, or TXT file."
+        )
+    return clean_text[:MAX_CV_CONTEXT_CHARS]
+
+
+def _decode_text_file(raw):
+    for encoding in ("utf-8-sig", "utf-16", "windows-1252"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def load_cv_context(session_id):
+    uploaded = get_current_cv()
+    if uploaded:
+        return {
+            "source": "uploaded_cv",
+            "label": uploaded["filename"],
+            "content": extract_cv_text(uploaded["path"]),
+        }
+
+    created = load_session_data(session_id)
+    profile = (created or {}).get("profile") or {}
+    lines = []
+    for item in profile.values():
+        if item.get("status") != "captured" or not item.get("value"):
+            continue
+        lines.append(f"{item.get('attribute', 'CV detail')}: {item['value']}")
+    if lines:
+        return {
+            "source": "created_cv",
+            "label": "voice-created CV profile",
+            "content": "\n".join(lines)[:MAX_CV_CONTEXT_CHARS],
+        }
+
+    raise InterviewError("Create or upload a CV before starting a mock interview.")
+
+
+def render_home_page(session_id=None):
     cv = get_current_cv()
     if cv:
         cv_section = f"""
@@ -772,12 +866,24 @@ def render_home_page():
           </div>
         """
 
-    interview_section = """
-      <div class="empty-state">
-        No interviews yet. Once you practice, your latest score and feedback summary will appear here.
-      </div>
-      <a class="button green" href="/interview">Start interview</a>
-    """
+    transcript_path = (
+        Path(MOCK_INTERVIEW_TRANSCRIPT_DIR) / f"{session_id}.txt" if session_id else None
+    )
+    if transcript_path and transcript_path.is_file():
+        interview_section = """
+          <a class="cv-link" href="/interview-transcript" target="_blank" rel="noreferrer">
+            <span>Latest interview transcript</span>
+            <span class="cv-type">TXT</span>
+          </a>
+          <a class="button green" href="/interview">Start another interview</a>
+        """
+    else:
+        interview_section = """
+          <div class="empty-state">
+            No interviews yet. Your latest speaker transcript will appear here after you practice.
+          </div>
+          <a class="button green" href="/interview">Start interview</a>
+        """
 
     return HOME_PAGE.replace("{cv_section}", cv_section).replace(
         "{interview_section}", interview_section
@@ -932,7 +1038,12 @@ class AppHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/":
-            self.respond(200, render_home_page())
+            session_id, cookie_header = self.session_id()
+            self.respond(
+                200,
+                render_home_page(session_id),
+                extra_headers={"Set-Cookie": cookie_header},
+            )
             return
         if path == "/cv":
             self.serve_current_cv()
@@ -952,19 +1063,68 @@ class AppHandler(BaseHTTPRequestHandler):
             )
             return
         if path == "/interview":
-            self.respond(
+            session_id, cookie_header = self.session_id()
+            self.respond(200, INTERVIEW_PAGE, extra_headers={"Set-Cookie": cookie_header})
+            return
+        if path == "/interview-transcript":
+            session_id, cookie_header = self.session_id()
+            transcript_path = Path(MOCK_INTERVIEW_TRANSCRIPT_DIR) / f"{session_id}.txt"
+            if not transcript_path.is_file():
+                self.respond(
+                    404,
+                    MESSAGE_PAGE.format(
+                        title="Interview transcript",
+                        heading="No transcript found",
+                        message="Complete a mock interview first, then its transcript will appear here.",
+                    ),
+                    extra_headers={"Set-Cookie": cookie_header},
+                )
+                return
+            try:
+                content = transcript_path.read_bytes()
+            except OSError as exc:
+                self.respond_json(500, {"error": f"The transcript could not be read: {exc}"})
+                return
+            self.respond_bytes(
                 200,
-                MESSAGE_PAGE.format(
-                    title="Start interview",
-                    heading="Start interview",
-                    message="The mock interview flow will start here once it is connected.",
-                ),
+                content,
+                "text/plain; charset=utf-8",
+                {"Set-Cookie": cookie_header},
             )
             return
         self.respond(404, "Not found", "text/plain")
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if path == "/api/mock-interview/start":
+            session_id, cookie_header = self.session_id()
+            try:
+                raw_body = self.read_request_body(16 * 1024)
+                payload = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+                company_url = str(payload.get("company_url", "")).strip()
+                job_title = str(payload.get("job_title", "")).strip()
+                if not company_url:
+                    raise InterviewError("Please enter the company website URL.")
+                company_context = fetch_company_context(company_url)
+                cv_context = load_cv_context(session_id)
+                result = MOCK_INTERVIEW_SERVICE.start(
+                    session_id,
+                    job_title,
+                    cv_context,
+                    company_context,
+                )
+                self.respond_json(200, result, {"Set-Cookie": cookie_header})
+            except (InterviewError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                self.respond_json(400, {"error": str(exc)}, {"Set-Cookie": cookie_header})
+            except ValueError as exc:
+                self.respond_json(413, {"error": str(exc)}, {"Set-Cookie": cookie_header})
+            return
+        if path == "/api/mock-interview/answer":
+            self.handle_mock_interview_answer()
+            return
+        if path == "/api/mock-interview/speak":
+            self.handle_mock_interview_speech()
+            return
         if path == "/api/interview/start":
             session_id, cookie_header = self.session_id()
             try:
@@ -1046,6 +1206,45 @@ class AppHandler(BaseHTTPRequestHandler):
             raw_body = self.read_request_body(16 * 1024)
             payload = json.loads(raw_body.decode("utf-8"))
             audio = INTERVIEW_SERVICE.synthesize(str(payload.get("text", "")))
+            self.respond_bytes(200, audio, "audio/wav")
+        except (InterviewError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            self.respond_json(400, {"error": str(exc)})
+        except ValueError as exc:
+            self.respond_json(413, {"error": str(exc)})
+
+    def handle_mock_interview_answer(self):
+        session_id, cookie_header = self.session_id()
+        try:
+            audio = self.read_request_body(MAX_AUDIO_SIZE)
+            if not audio:
+                raise InterviewError("No microphone audio was received.")
+            content_type = self.headers.get("Content-Type", "").split(";", 1)[0].lower()
+            suffix = {
+                "audio/webm": ".webm",
+                "audio/ogg": ".ogg",
+                "audio/wav": ".wav",
+                "audio/mp4": ".m4a",
+            }.get(content_type, ".audio")
+            temp_path = ""
+            try:
+                with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as audio_file:
+                    audio_file.write(audio)
+                    temp_path = audio_file.name
+                result = MOCK_INTERVIEW_SERVICE.answer(session_id, temp_path)
+            finally:
+                if temp_path:
+                    Path(temp_path).unlink(missing_ok=True)
+            self.respond_json(200, result, {"Set-Cookie": cookie_header})
+        except InterviewError as exc:
+            self.respond_json(400, {"error": str(exc)}, {"Set-Cookie": cookie_header})
+        except ValueError as exc:
+            self.respond_json(413, {"error": str(exc)}, {"Set-Cookie": cookie_header})
+
+    def handle_mock_interview_speech(self):
+        try:
+            raw_body = self.read_request_body(16 * 1024)
+            payload = json.loads(raw_body.decode("utf-8"))
+            audio = MOCK_INTERVIEW_SERVICE.synthesize(str(payload.get("text", "")))
             self.respond_bytes(200, audio, "audio/wav")
         except (InterviewError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             self.respond_json(400, {"error": str(exc)})

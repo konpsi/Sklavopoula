@@ -222,3 +222,6 @@ uploaded_cv/
 
 # Locally collected structured interview answers
 interview_data/
+
+# Locally collected mock interview transcripts
+mock_interview_transcripts/
