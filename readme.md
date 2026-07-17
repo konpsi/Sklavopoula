@@ -1,3 +1,58 @@
+# Local Voice CV Builder
+
+The existing **Create CV** action opens a minimal, voice-guided questionnaire. Audio is
+transcribed on the machine with `faster-whisper`, only the transcript and current
+questionnaire context are sent to OpenRouter, and the response is spoken locally using
+the operating system voice through `pyttsx3`.
+
+## Run with Python 3.10
+
+Create and activate a Python 3.10 virtual environment, then install the local speech
+dependencies:
+
+```powershell
+py -3.10 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+```
+
+Set the OpenRouter key in the shell that will run the app. Do not put a live key in the
+repository:
+
+```powershell
+$env:OPENROUTER_API_KEY = "your-openrouter-key"
+$env:OPENROUTER_MODEL = "openrouter/free"
+python app.py
+```
+
+Open <http://127.0.0.1:8080> and choose **Create CV**. Allow microphone access when the
+browser asks. The first Whisper run downloads the selected model; after that, STT
+inference is local. The default `tiny.en` model is intentionally small for an MVP. Set
+`WHISPER_MODEL=small.en` for better English accuracy, or `WHISPER_MODEL=small` and
+`STT_LANGUAGE` for another language.
+
+On Linux, `pyttsx3` also needs an installed local speech engine such as `espeak-ng`.
+Windows uses its installed SAPI voices.
+
+## Voice interview structure
+
+- `questionnaire.py` is the editable general CV questionnaire outline.
+- `voice_interview.py` owns local STT/TTS, OpenRouter calls, validation, and answer storage.
+- `create_page.py` contains the intentionally minimal one-button browser UI.
+- Structured answers are written to `interview_data/<session-id>.json` and are ignored by Git.
+- Temporary microphone recordings are deleted immediately after transcription.
+
+`OPENROUTER_MODEL` defaults to `openrouter/free`, the zero-cost starter router. It can be
+changed to any OpenRouter model slug without code changes.
+
+## Tests
+
+The unit tests do not need speech models or a live API key:
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
 # Project Backlog
 
 ## Product Vision
