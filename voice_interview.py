@@ -44,7 +44,7 @@ class InterviewSession:
 class OpenRouterClient:
     def __init__(self) -> None:
         self.api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
-        self.model = os.environ.get("OPENROUTER_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
+        self.model = DEFAULT_MODEL
 
     @property
     def configured(self) -> bool:

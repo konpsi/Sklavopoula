@@ -25,7 +25,6 @@ repository:
 
 ```powershell
 $env:OPENROUTER_API_KEY = "your-openrouter-key"
-$env:OPENROUTER_MODEL = "google/gemini-2.5-flash-lite"
 python app.py
 ```
 
@@ -51,9 +50,8 @@ Windows uses its installed SAPI voices.
   conversational audit trail under `turns`. These local files are ignored by Git.
 - Temporary microphone recordings are deleted immediately after transcription.
 
-`OPENROUTER_MODEL` defaults to `google/gemini-2.5-flash-lite` for consistent, inexpensive
-evaluation and question selection. It can be changed to any OpenRouter model slug without
-code changes. OpenRouter requests require
+The model is pinned in `voice_interview.py` as `google/gemini-2.5-flash-lite` for
+consistent, inexpensive evaluation and question selection. OpenRouter requests require
 strict JSON-schema support and use response healing. If a provider or API request still fails, the page and server
 terminal show the sanitized OpenRouter error while the questionnaire safely continues
 in its defined order.
