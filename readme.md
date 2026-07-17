@@ -38,6 +38,10 @@ accuracy, or `WHISPER_MODEL=small` and `STT_LANGUAGE` for another language.
 On Linux, `pyttsx3` also needs an installed local speech engine such as `espeak-ng`.
 Windows uses its installed SAPI voices.
 
+On Windows, some local speech/transcription dependency combinations can load duplicate
+OpenMP runtimes. The app sets `KMP_DUPLICATE_LIB_OK=TRUE` by default for local
+development so the process can continue.
+
 ## Voice interview structure
 
 - `questionnaire.py` is the editable general CV questionnaire outline.

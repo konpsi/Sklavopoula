@@ -42,6 +42,7 @@ def load_local_env():
 
 
 load_local_env()
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 INTERVIEW_SERVICE = VoiceInterviewService(INTERVIEW_DATA_DIR)
 MAX_COMPANY_CONTEXT_CHARS = 12000
 
